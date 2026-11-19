@@ -17,7 +17,7 @@ export async function generatePortfolioPdfBuffer(summary: DemoPortfolioSummary):
       .fillColor("#38BDF8")
       .fontSize(11)
       .font("Helvetica")
-      .text("5-Agent Demo Portfel va Natijalar Hisoboti (MEXC Spot)", 42, 50);
+      .text("5-Agent Hybrid (Intraday + Swing) Demo Portfel Hisoboti (MEXC Spot)", 42, 50);
 
     doc
       .fillColor("#94A3B8")
@@ -29,7 +29,7 @@ export async function generatePortfolioPdfBuffer(summary: DemoPortfolioSummary):
 
     // KPI Box
     const kpiTop = 126;
-    doc.roundedRect(42, kpiTop, 511, 88, 6).fillAndStroke("#F8FAFC", "#CBD5E1");
+    doc.roundedRect(42, kpiTop, 511, 108, 6).fillAndStroke("#F8FAFC", "#CBD5E1");
     doc.fillColor("#0F172A").font("Helvetica-Bold").fontSize(10);
 
     const pnlSign = summary.totalPnlUsd >= 0 ? "+" : "";
@@ -38,69 +38,101 @@ export async function generatePortfolioPdfBuffer(summary: DemoPortfolioSummary):
     doc.text(`Umumiy PnL: ${pnlSign}$${summary.totalPnlUsd.toFixed(2)} (${pnlSign}${summary.totalPnlPct}%)`, 380, kpiTop + 14);
 
     doc.font("Helvetica").fillColor("#334155");
-    doc.text(`Win Rate: ${summary.winRatePct}%`, 56, kpiTop + 42);
-    doc.text(`Yopilgan savdolar: ${summary.closedTradesCount} (Foyda: ${summary.winningTrades} / Zarar: ${summary.losingTrades})`, 230, kpiTop + 42);
-    doc.text(`Ochiq savdolar: ${summary.openTradesCount}`, 56, kpiTop + 64);
-    doc.text(`Profit Factor: ${summary.profitFactor} | Max Drawdown: ${summary.maxDrawdownPct}%`, 230, kpiTop + 64);
+    doc.text(`Win Rate: ${summary.winRatePct}%`, 56, kpiTop + 40);
+    doc.text(`Yopilgan savdolar: ${summary.closedTradesCount} (Foyda: ${summary.winningTrades} / Zarar: ${summary.losingTrades})`, 230, kpiTop + 40);
+    doc.text(`Ochiq savdolar: ${summary.openTradesCount}`, 56, kpiTop + 62);
+    doc.text(`Profit Factor: ${summary.profitFactor} | Max Drawdown: ${summary.maxDrawdownPct}%`, 230, kpiTop + 62);
+
+    // Intraday vs Swing breakdown line
+    doc.font("Helvetica-Bold").fillColor("#0F172A").fontSize(9);
+    doc.text(
+      `Intraday Win Rate: ${summary.intradayStats.winRatePct}% (${summary.intradayStats.wins}/${summary.intradayStats.total})`,
+      56,
+      kpiTop + 84
+    );
+    doc.text(
+      `Swing Win Rate: ${summary.swingStats.winRatePct}% (${summary.swingStats.wins}/${summary.swingStats.total})`,
+      280,
+      kpiTop + 84
+    );
 
     // Open Trades Section
-    let y = 236;
+    let y = 252;
     doc.fillColor("#0F172A").font("Helvetica-Bold").fontSize(13).text("2. Ochiq Demo Pozitsiyalar", 42, y);
-    y += 22;
+    y += 20;
 
     if (summary.openTrades.length === 0) {
       doc.font("Helvetica").fontSize(10).fillColor("#64748B").text("Hozircha ochiq pozitsiyalar yo'q.", 42, y);
-      y += 24;
+      y += 22;
     } else {
       doc.font("Helvetica-Bold").fontSize(9).fillColor("#1E3A8A");
       doc.text("Juftlik", 42, y);
-      doc.text("Entry", 130, y);
-      doc.text("TP", 210, y);
-      doc.text("SL", 290, y);
-      doc.text("R:R", 370, y);
-      doc.text("Hajm ($)", 440, y);
-      y += 16;
+      doc.text("Rejim", 118, y);
+      doc.text("Entry", 178, y);
+      doc.text("TP1 / TP2", 248, y);
+      doc.text("SL (BE)", 360, y);
+      doc.text("Hajm ($)", 455, y);
+      y += 15;
 
       doc.font("Helvetica").fontSize(9).fillColor("#0F172A");
       for (const t of summary.openTrades) {
         doc.text(t.symbol, 42, y);
-        doc.text(String(t.entryPrice), 130, y);
-        doc.text(String(t.takeProfitPrice), 210, y);
-        doc.text(String(t.stopLossPrice), 290, y);
-        doc.text(`1:${t.riskRewardRatio}`, 370, y);
-        doc.text(`$${t.positionSizeUsd}`, 440, y);
-        y += 16;
+        doc.text(t.tradeMode, 118, y);
+        doc.text(String(t.entryPrice), 178, y);
+        doc.text(`${t.tp1Price} / ${t.tp2Price}`, 248, y);
+        doc.text(`${t.stopLossPrice}${t.breakevenActive ? " (BE)" : ""}`, 360, y);
+        doc.text(`$${t.positionSizeUsd}`, 455, y);
+        y += 15;
       }
       y += 10;
     }
 
     // Closed Trades Section
     doc.fillColor("#0F172A").font("Helvetica-Bold").fontSize(13).text("3. So'nggi Yopilgan Savdolar", 42, y);
-    y += 22;
+    y += 20;
 
     if (summary.recentClosedTrades.length === 0) {
       doc.font("Helvetica").fontSize(10).fillColor("#64748B").text("Hali yopilgan savdolar mavjud emas.", 42, y);
+      y += 24;
     } else {
       doc.font("Helvetica-Bold").fontSize(9).fillColor("#1E3A8A");
       doc.text("Juftlik", 42, y);
-      doc.text("Holat", 130, y);
-      doc.text("Entry", 205, y);
-      doc.text("Exit", 285, y);
+      doc.text("Holat", 125, y);
+      doc.text("Entry", 215, y);
+      doc.text("Exit", 290, y);
       doc.text("PnL (%)", 370, y);
       doc.text("PnL ($)", 445, y);
-      y += 16;
+      y += 15;
 
       doc.font("Helvetica").fontSize(9);
-      for (const t of summary.recentClosedTrades.slice(0, 15)) {
+      for (const t of summary.recentClosedTrades.slice(0, 12)) {
         const isPos = (t.pnlUsd ?? 0) >= 0;
         doc.fillColor("#0F172A").text(t.symbol, 42, y);
-        doc.fillColor(isPos ? "#15803D" : "#B91C1C").text(t.status, 130, y);
-        doc.fillColor("#0F172A").text(String(t.entryPrice), 205, y);
-        doc.text(String(t.exitPrice ?? "-"), 285, y);
+        doc.fillColor(isPos ? "#15803D" : "#B91C1C").text(t.status, 125, y);
+        doc.fillColor("#0F172A").text(String(t.entryPrice), 215, y);
+        doc.text(String(t.exitPrice ?? "-"), 290, y);
         doc.fillColor(isPos ? "#15803D" : "#B91C1C").text(`${isPos ? "+" : ""}${t.pnlPercent ?? 0}%`, 370, y);
         doc.text(`${isPos ? "+" : ""}$${t.pnlUsd ?? 0}`, 445, y);
-        y += 16;
-        if (y > 740) break;
+        y += 15;
+        if (y > 650) break;
+      }
+      y += 12;
+    }
+
+    // SL Post-Mortem Breakdown Section
+    if (y < 710) {
+      doc.fillColor("#0F172A").font("Helvetica-Bold").fontSize(13).text("4. SL Sabablari (Post-Mortem)", 42, y);
+      y += 20;
+      const entries = Object.entries(summary.slPostMortemBreakdown || {});
+      if (entries.length === 0) {
+        doc.font("Helvetica").fontSize(10).fillColor("#64748B").text("Hozircha Stop-Loss (SL_HIT) holatlari qayd etilmagan.", 42, y);
+      } else {
+        doc.font("Helvetica").fontSize(9).fillColor("#334155");
+        for (const [reason, count] of entries) {
+          doc.text(`• ${reason}: ${count} ta savdo`, 50, y);
+          y += 15;
+          if (y > 750) break;
+        }
       }
     }
 

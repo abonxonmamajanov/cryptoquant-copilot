@@ -16,7 +16,8 @@
     "verify:stage3": "tsx scripts/e2e_stage3_verify.ts",
     "verify:stage4": "tsx scripts/e2e_stage4_verify.ts",
     "verify:stage5": "tsx scripts/e2e_stage5_verify.ts",
-    "verify:stage5_2": "tsx scripts/e2e_stage5_2_verify.ts"
+    "verify:stage5_2": "tsx scripts/e2e_stage5_2_verify.ts",
+    "verify:stage5_4": "tsx scripts/e2e_stage5_4_verify.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",

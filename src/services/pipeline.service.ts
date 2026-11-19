@@ -5,6 +5,7 @@ import { runMacroFlowAgent, MacroFlowResult } from "../agents/macroFlow.agent";
 import { runCriticRiskAgent, CriticRiskResult } from "../agents/criticRisk.agent";
 import {
   ExecutiveDispatchResult,
+  formatTp1BreakevenCard,
   formatTradeClosedCard,
   runExecutiveAgent,
   sendTelegramTextMessage
@@ -17,11 +18,14 @@ import {
   getDemoPortfolioSummary,
   openDemoTradeFromSignal
 } from "./demoPortfolio.service";
+import { FundamentalReport, runFundamentalShield } from "./fundamental.service";
+import { getActiveSignalMode, SignalMode } from "./subscription.service";
 
 export interface EvaluatedSignalRecord {
   scout: ScoutCandidate;
   technician: TechnicalAnalysisResult;
   macroFlow: MacroFlowResult;
+  fundamental?: FundamentalReport;
   criticRisk: CriticRiskResult;
   executive: ExecutiveDispatchResult | null;
 }
@@ -29,10 +33,12 @@ export interface EvaluatedSignalRecord {
 export interface PipelineRunSnapshot {
   runAt: string;
   durationMs: number;
+  activeSignalMode: SignalMode;
   scoutSummary: Omit<ScoutScanSnapshot, "candidates">;
   evaluatedCount: number;
   approvedCount: number;
   rejectedCount: number;
+  tp1BreakevenThisRun: DemoTradeItem[];
   closedTradesThisRun: DemoTradeItem[];
   portfolioSummary: DemoPortfolioSummary;
   records: EvaluatedSignalRecord[];
@@ -52,13 +58,17 @@ export async function runFiveAgentPipeline(): Promise<{
   const started = Date.now();
   const allTickers = await fetchMexcTickers24h();
 
-  // 1. Evaluate any open Demo Portfolio positions against live prices
+  // 1. Evaluate any open Demo Portfolio positions against live prices (TP1 Breakeven + TP2/SL/Expiry)
   const priceMap = new Map<string, number>();
   for (const ticker of allTickers) {
     priceMap.set(ticker.symbol, ticker.lastPrice);
   }
-  const closedTradesThisRun = evaluateOpenDemoTrades(priceMap);
+  const tp1BreakevenThisRun: DemoTradeItem[] = [];
+  const closedTradesThisRun = evaluateOpenDemoTrades(priceMap, Date.now(), tp1BreakevenThisRun);
 
+  for (const tp1Trade of tp1BreakevenThisRun) {
+    await sendTelegramTextMessage(formatTp1BreakevenCard(tp1Trade)).catch(() => {});
+  }
   for (const closedTrade of closedTradesThisRun) {
     await sendTelegramTextMessage(formatTradeClosedCard(closedTrade)).catch(() => {});
   }
@@ -66,29 +76,44 @@ export async function runFiveAgentPipeline(): Promise<{
   // 2. Run Scout Agent reusing the fetched 24h tickers
   const scoutSnapshot = await runScoutScan(allTickers);
   const topCandidates = scoutSnapshot.candidates.slice(0, MAX_SYMBOLS_TO_EVALUATE);
+  const activeSignalMode = getActiveSignalMode();
 
   const records: EvaluatedSignalRecord[] = [];
 
   for (const candidate of topCandidates) {
-    const [technician, macroFlow] = await Promise.all([
+    const [technician, macroFlow, fundamental] = await Promise.all([
       runTechnicianAgent(candidate),
-      runMacroFlowAgent(candidate.symbol)
+      runMacroFlowAgent(candidate.symbol),
+      runFundamentalShield(candidate.symbol)
     ]);
 
-    const criticRisk = runCriticRiskAgent(candidate, technician, macroFlow);
+    const criticRisk = runCriticRiskAgent(candidate, technician, macroFlow, fundamental);
 
     let executive: ExecutiveDispatchResult | null = null;
     const record: EvaluatedSignalRecord = {
       scout: candidate,
       technician,
       macroFlow,
+      fundamental,
       criticRisk,
       executive
     };
 
     if (criticRisk.verdict === "APPROVE") {
-      if (canDispatchSignal(candidate.symbol)) {
-        executive = await runExecutiveAgent(candidate, technician, macroFlow, criticRisk);
+      const tradeMode = criticRisk.tradeMode ?? technician.tradeMode ?? "INTRADAY";
+      const modeAllowed =
+        activeSignalMode === "HYBRID" || activeSignalMode === tradeMode;
+
+      if (!modeAllowed) {
+        criticRisk.reasons.push(`Faol rejim ${activeSignalMode} — ${tradeMode} signali o'tkazib yuborildi`);
+      } else if (canDispatchSignal(candidate.symbol)) {
+        executive = await runExecutiveAgent(
+          candidate,
+          technician,
+          macroFlow,
+          criticRisk,
+          fundamental
+        );
         record.executive = executive;
         markSignalDispatched(candidate.symbol);
         openDemoTradeFromSignal(record);
@@ -107,10 +132,12 @@ export async function runFiveAgentPipeline(): Promise<{
   const pipelineSnapshot: PipelineRunSnapshot = {
     runAt: new Date().toISOString(),
     durationMs: Date.now() - started,
+    activeSignalMode,
     scoutSummary,
     evaluatedCount: records.length,
     approvedCount,
     rejectedCount,
+    tp1BreakevenThisRun,
     closedTradesThisRun,
     portfolioSummary: getDemoPortfolioSummary(),
     records

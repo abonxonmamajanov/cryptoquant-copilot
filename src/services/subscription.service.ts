@@ -3,6 +3,7 @@ import path from "path";
 
 export type PlanTier = "FREE" | "PRO" | "VIP";
 export type RiskProfile = "CONSERVATIVE" | "MODERATE" | "AGGRESSIVE";
+export type SignalMode = "HYBRID" | "INTRADAY" | "SWING";
 
 export interface PlanDefinition {
   tier: PlanTier;
@@ -19,6 +20,7 @@ export interface SubscriberRecord {
   firstName: string | null;
   tier: PlanTier;
   riskProfile: RiskProfile;
+  signalMode?: SignalMode;
   createdAt: string;
   updatedAt: string;
 }
@@ -69,8 +71,10 @@ export const LEGAL_DISCLAIMER_UZ =
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const SUBS_FILE = path.join(DATA_DIR, "subscriptions.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 let subscribers = loadSubscribers();
+let activeSignalMode: SignalMode = loadSignalMode();
 
 function loadSubscribers(): Record<string, SubscriberRecord> {
   try {
@@ -83,6 +87,26 @@ function loadSubscribers(): Record<string, SubscriberRecord> {
   return {};
 }
 
+function loadSignalMode(): SignalMode {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")) as {
+        signalMode?: SignalMode;
+      };
+      if (
+        parsed.signalMode === "HYBRID" ||
+        parsed.signalMode === "INTRADAY" ||
+        parsed.signalMode === "SWING"
+      ) {
+        return parsed.signalMode;
+      }
+    }
+  } catch {
+    // Fallback HYBRID
+  }
+  return "HYBRID";
+}
+
 function saveSubscribers(): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -92,6 +116,37 @@ function saveSubscribers(): void {
   } catch {
     // Non-fatal
   }
+}
+
+function saveSignalMode(): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(
+      SETTINGS_FILE,
+      JSON.stringify({ signalMode: activeSignalMode, updatedAt: new Date().toISOString() }, null, 2),
+      "utf-8"
+    );
+  } catch {
+    // Non-fatal
+  }
+}
+
+export function getActiveSignalMode(): SignalMode {
+  return activeSignalMode;
+}
+
+export function setActiveSignalMode(mode: SignalMode, telegramUserId?: string): SignalMode {
+  activeSignalMode = mode;
+  saveSignalMode();
+  if (telegramUserId) {
+    const user = upsertSubscriber(telegramUserId);
+    user.signalMode = mode;
+    user.updatedAt = new Date().toISOString();
+    saveSubscribers();
+  }
+  return activeSignalMode;
 }
 
 export function upsertSubscriber(
@@ -115,6 +170,7 @@ export function upsertSubscriber(
     firstName,
     tier: "FREE",
     riskProfile: "MODERATE",
+    signalMode: activeSignalMode,
     createdAt: now,
     updatedAt: now
   };
@@ -137,4 +193,5 @@ export function getSubscriberCount(): number {
 
 export function resetSubscribersForTest(): void {
   subscribers = {};
+  activeSignalMode = "HYBRID";
 }

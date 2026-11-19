@@ -1,16 +1,27 @@
 import fs from "fs";
 import path from "path";
 import { EvaluatedSignalRecord } from "./pipeline.service";
+import type { TradeMode } from "../agents/technician.agent";
 
-export type DemoTradeStatus = "OPEN" | "TP_HIT" | "SL_HIT" | "EXPIRED";
+export type DemoTradeStatus = "OPEN" | "TP_HIT" | "SL_HIT" | "BREAKEVEN_EXIT" | "EXPIRED";
 
 export interface DemoTradeItem {
   id: string;
   symbol: string;
   exchange: "MEXC";
+  tradeMode: TradeMode;
   entryPrice: number;
   takeProfitPrice: number;
+  tp1Price: number;
+  tp2Price: number;
+  tp3Price: number;
   stopLossPrice: number;
+  tp1Hit: boolean;
+  breakevenActive: boolean;
+  entryRsi: number;
+  entryBtc1hPct: number;
+  entrySpreadPct: number;
+  slPostMortemReason: string | null;
   riskRewardRatio: number;
   confidenceScore: number;
   positionSizeUsd: number;
@@ -20,6 +31,12 @@ export interface DemoTradeItem {
   pnlPercent: number | null;
   openedAt: string;
   closedAt: string | null;
+}
+
+export interface ModeStats {
+  total: number;
+  wins: number;
+  winRatePct: number;
 }
 
 export interface DemoPortfolioState {
@@ -46,6 +63,9 @@ export interface DemoPortfolioSummary {
   winRatePct: number;
   profitFactor: number;
   maxDrawdownPct: number;
+  intradayStats: ModeStats;
+  swingStats: ModeStats;
+  slPostMortemBreakdown: Record<string, number>;
   openTrades: DemoTradeItem[];
   recentClosedTrades: DemoTradeItem[];
   updatedAt: string;
@@ -55,7 +75,63 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const STATE_FILE = path.join(DATA_DIR, "demo_portfolio.json");
 const MAX_OPEN_TRADES = 5;
 const POSITION_ALLOCATION_PCT = 0.1; // 10% per trade
-const MAX_HOLD_MS = 24 * 60 * 60 * 1000; // 24h expiry
+const MAX_HOLD_INTRADAY_MS = 24 * 60 * 60 * 1000; // 24h expiry for intraday
+const MAX_HOLD_SWING_MS = 72 * 60 * 60 * 1000; // 72h expiry for swing
+
+// Lazy optional Prisma client for non-blocking PostgreSQL sync
+let prismaClientInstance: unknown = null;
+let prismaInitAttempted = false;
+
+function hasPostgresUrl(): boolean {
+  const url = String(process.env.DATABASE_URL || "").trim();
+  return url.startsWith("postgresql://") && !url.includes("USER:PASSWORD@HOST");
+}
+
+function getOptionalPrisma(): {
+  signal: { create: (args: unknown) => Promise<unknown> };
+} | null {
+  if (!hasPostgresUrl()) return null;
+  if (!prismaInitAttempted) {
+    prismaInitAttempted = true;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { PrismaClient } = require("@prisma/client") as { PrismaClient: new () => unknown };
+      prismaClientInstance = new PrismaClient();
+    } catch {
+      prismaClientInstance = null;
+    }
+  }
+  return prismaClientInstance as {
+    signal: { create: (args: unknown) => Promise<unknown> };
+  } | null;
+}
+
+function syncSignalToPostgresNonBlocking(trade: DemoTradeItem, status: "APPROVED" | "TP_HIT" | "SL_HIT" | "EXPIRED"): void {
+  try {
+    const prisma = getOptionalPrisma();
+    if (!prisma) return;
+    prisma.signal
+      .create({
+        data: {
+          symbol: trade.symbol,
+          exchange: trade.exchange,
+          direction: "LONG",
+          status,
+          entryPrice: trade.entryPrice,
+          takeProfitPrice: trade.takeProfitPrice,
+          stopLossPrice: trade.stopLossPrice,
+          riskRewardRatio: trade.riskRewardRatio,
+          confidenceScore: trade.confidenceScore,
+          rejectReason: trade.slPostMortemReason
+        }
+      })
+      .catch(() => {
+        // Non-blocking: never crash trading if DB is unreachable
+      });
+  } catch {
+    // Non-fatal
+  }
+}
 
 function createDefaultState(): DemoPortfolioState {
   return {
@@ -72,12 +148,47 @@ function createDefaultState(): DemoPortfolioState {
 
 let portfolioState: DemoPortfolioState = loadStateFromDisk();
 
+function normalizeLoadedTrade(t: Partial<DemoTradeItem>): DemoTradeItem {
+  const entry = Number(t.entryPrice ?? 0);
+  const tp = Number(t.takeProfitPrice ?? entry);
+  const sl = Number(t.stopLossPrice ?? entry);
+  return {
+    id: String(t.id ?? `demo_${Date.now()}`),
+    symbol: String(t.symbol ?? ""),
+    exchange: "MEXC",
+    tradeMode: t.tradeMode === "SWING" ? "SWING" : "INTRADAY",
+    entryPrice: entry,
+    takeProfitPrice: tp,
+    tp1Price: Number(t.tp1Price ?? entry + (tp - entry) * 0.55),
+    tp2Price: Number(t.tp2Price ?? tp),
+    tp3Price: Number(t.tp3Price ?? entry + (tp - entry) * 1.45),
+    stopLossPrice: sl,
+    tp1Hit: Boolean(t.tp1Hit),
+    breakevenActive: Boolean(t.breakevenActive),
+    entryRsi: Number(t.entryRsi ?? 50),
+    entryBtc1hPct: Number(t.entryBtc1hPct ?? 0),
+    entrySpreadPct: Number(t.entrySpreadPct ?? 0),
+    slPostMortemReason: t.slPostMortemReason ?? null,
+    riskRewardRatio: Number(t.riskRewardRatio ?? 2),
+    confidenceScore: Number(t.confidenceScore ?? 60),
+    positionSizeUsd: Number(t.positionSizeUsd ?? 100),
+    status: (t.status as DemoTradeStatus) ?? "OPEN",
+    exitPrice: t.exitPrice ?? null,
+    pnlUsd: t.pnlUsd ?? null,
+    pnlPercent: t.pnlPercent ?? null,
+    openedAt: String(t.openedAt ?? new Date().toISOString()),
+    closedAt: t.closedAt ?? null
+  };
+}
+
 function loadStateFromDisk(): DemoPortfolioState {
   try {
     if (fs.existsSync(STATE_FILE)) {
       const raw = fs.readFileSync(STATE_FILE, "utf-8");
       const parsed = JSON.parse(raw) as DemoPortfolioState;
       if (parsed && typeof parsed.currentBalanceUsd === "number") {
+        parsed.openTrades = (parsed.openTrades || []).map(normalizeLoadedTrade);
+        parsed.closedTrades = (parsed.closedTrades || []).map(normalizeLoadedTrade);
         return parsed;
       }
     }
@@ -99,6 +210,13 @@ function persistState(): void {
   }
 }
 
+function classifySlPostMortem(trade: DemoTradeItem): string {
+  if (trade.entryRsi > 70) return "RSI yuqori edi";
+  if (trade.entrySpreadPct > 0.25) return "Spread keng edi";
+  if (trade.entryBtc1hPct < -0.5) return "BTC bosimi";
+  return "Bozor volatilligi / soxta impuls";
+}
+
 export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTradeItem | null {
   if (record.criticRisk.verdict !== "APPROVE") return null;
 
@@ -110,13 +228,31 @@ export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTrad
     Math.max(25, portfolioState.currentBalanceUsd * POSITION_ALLOCATION_PCT).toFixed(2)
   );
 
+  const entry = record.technician.entryPrice;
+  const tp2 = record.technician.tp2Price ?? record.technician.takeProfitPrice;
+  const risk = Math.max(entry - record.technician.stopLossPrice, entry * 0.005);
+  const tp1 = record.technician.tp1Price ?? Number((entry + risk * 1.3).toFixed(5));
+  const tp3 = record.technician.tp3Price ?? Number((entry + risk * 3.2).toFixed(5));
+  const tradeMode: TradeMode =
+    record.criticRisk.tradeMode ?? record.technician.tradeMode ?? "INTRADAY";
+
   const trade: DemoTradeItem = {
     id: `demo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     symbol: record.scout.symbol,
     exchange: "MEXC",
-    entryPrice: record.technician.entryPrice,
-    takeProfitPrice: record.technician.takeProfitPrice,
+    tradeMode,
+    entryPrice: entry,
+    takeProfitPrice: tp2,
+    tp1Price: tp1,
+    tp2Price: tp2,
+    tp3Price: tp3,
     stopLossPrice: record.technician.stopLossPrice,
+    tp1Hit: false,
+    breakevenActive: false,
+    entryRsi: record.technician.rsi14,
+    entryBtc1hPct: record.macroFlow.btcChange1hPct,
+    entrySpreadPct: record.macroFlow.spreadPct,
+    slPostMortemReason: null,
     riskRewardRatio: record.technician.riskRewardRatio,
     confidenceScore: record.criticRisk.confidenceScore,
     positionSizeUsd,
@@ -130,15 +266,18 @@ export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTrad
 
   portfolioState.openTrades.push(trade);
   persistState();
+  syncSignalToPostgresNonBlocking(trade, "APPROVED");
   return trade;
 }
 
 export function evaluateOpenDemoTrades(
   priceMap: Map<string, number>,
-  now = Date.now()
+  now = Date.now(),
+  tp1EventsOut?: DemoTradeItem[]
 ): DemoTradeItem[] {
   const newlyClosed: DemoTradeItem[] = [];
   const stillOpen: DemoTradeItem[] = [];
+  let mutated = false;
 
   for (const trade of portfolioState.openTrades) {
     const livePrice = priceMap.get(trade.symbol);
@@ -147,16 +286,35 @@ export function evaluateOpenDemoTrades(
       continue;
     }
 
+    // 1. Check TP1 Breakeven transition first (if not yet at TP2)
+    if (!trade.tp1Hit && livePrice >= trade.tp1Price && livePrice < trade.takeProfitPrice) {
+      trade.tp1Hit = true;
+      trade.breakevenActive = true;
+      trade.stopLossPrice = trade.entryPrice;
+      mutated = true;
+      if (tp1EventsOut) tp1EventsOut.push({ ...trade });
+      stillOpen.push(trade);
+      continue;
+    }
+
     let closeStatus: DemoTradeStatus | null = null;
     let exitPrice = livePrice;
+    const maxHoldMs = trade.tradeMode === "SWING" ? MAX_HOLD_SWING_MS : MAX_HOLD_INTRADAY_MS;
 
     if (livePrice >= trade.takeProfitPrice) {
+      trade.tp1Hit = true;
       closeStatus = "TP_HIT";
       exitPrice = trade.takeProfitPrice;
     } else if (livePrice <= trade.stopLossPrice) {
-      closeStatus = "SL_HIT";
-      exitPrice = trade.stopLossPrice;
-    } else if (now - new Date(trade.openedAt).getTime() >= MAX_HOLD_MS) {
+      if (trade.breakevenActive) {
+        closeStatus = "BREAKEVEN_EXIT";
+        exitPrice = trade.entryPrice;
+      } else {
+        closeStatus = "SL_HIT";
+        exitPrice = trade.stopLossPrice;
+        trade.slPostMortemReason = classifySlPostMortem(trade);
+      }
+    } else if (now - new Date(trade.openedAt).getTime() >= maxHoldMs) {
       closeStatus = "EXPIRED";
       exitPrice = livePrice;
     }
@@ -191,13 +349,25 @@ export function evaluateOpenDemoTrades(
 
     portfolioState.closedTrades.unshift(trade);
     newlyClosed.push(trade);
+    mutated = true;
+
+    const prismaStatus =
+      closeStatus === "TP_HIT" ? "TP_HIT" : closeStatus === "SL_HIT" ? "SL_HIT" : "EXPIRED";
+    syncSignalToPostgresNonBlocking(trade, prismaStatus);
   }
 
   portfolioState.openTrades = stillOpen;
-  if (newlyClosed.length > 0) {
+  if (mutated) {
     persistState();
   }
   return newlyClosed;
+}
+
+function calcModeStats(trades: DemoTradeItem[], mode: TradeMode): ModeStats {
+  const filtered = trades.filter((t) => (t.tradeMode ?? "INTRADAY") === mode);
+  const wins = filtered.filter((t) => (t.pnlUsd ?? 0) > 0).length;
+  const winRatePct = filtered.length > 0 ? Number(((wins / filtered.length) * 100).toFixed(1)) : 0;
+  return { total: filtered.length, wins, winRatePct };
 }
 
 export function getDemoPortfolioSummary(): DemoPortfolioSummary {
@@ -218,6 +388,14 @@ export function getDemoPortfolioSummary(): DemoPortfolioSummary {
     ((totalPnlUsd / portfolioState.initialBalanceUsd) * 100).toFixed(2)
   );
 
+  const slPostMortemBreakdown: Record<string, number> = {};
+  for (const t of closed) {
+    if (t.status === "SL_HIT" && t.slPostMortemReason) {
+      slPostMortemBreakdown[t.slPostMortemReason] =
+        (slPostMortemBreakdown[t.slPostMortemReason] ?? 0) + 1;
+    }
+  }
+
   return {
     name: portfolioState.name,
     initialBalanceUsd: portfolioState.initialBalanceUsd,
@@ -231,6 +409,9 @@ export function getDemoPortfolioSummary(): DemoPortfolioSummary {
     winRatePct,
     profitFactor,
     maxDrawdownPct: portfolioState.maxDrawdownPct,
+    intradayStats: calcModeStats(closed, "INTRADAY"),
+    swingStats: calcModeStats(closed, "SWING"),
+    slPostMortemBreakdown,
     openTrades: portfolioState.openTrades,
     recentClosedTrades: closed.slice(0, 20),
     updatedAt: portfolioState.updatedAt

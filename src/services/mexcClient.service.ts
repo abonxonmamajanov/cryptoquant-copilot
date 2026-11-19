@@ -123,7 +123,7 @@ export async function fetchMexcTickerPrice(symbol: string): Promise<number> {
 
 export async function fetchMexcKlines(
   symbol: string,
-  interval: "15m" | "1h" | "60m" = "15m",
+  interval: "15m" | "1h" | "60m" | "4h" = "15m",
   limit = 60
 ): Promise<MexcKline[]> {
   const mexcInterval = interval === "1h" ? "60m" : interval;

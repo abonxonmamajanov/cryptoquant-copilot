@@ -1,12 +1,18 @@
 import { fetchMexcKlines } from "../services/mexcClient.service";
 import { ScoutCandidate } from "./scout.agent";
 
+export type TradeMode = "INTRADAY" | "SWING";
+
 export interface TechnicalAnalysisResult {
   symbol: string;
   direction: "LONG" | "SKIP";
+  tradeMode?: TradeMode;
   entryPrice: number;
   stopLossPrice: number;
   takeProfitPrice: number;
+  tp1Price?: number;
+  tp2Price?: number;
+  tp3Price?: number;
   riskRewardRatio: number;
   rsi14: number;
   ema9: number;
@@ -59,7 +65,10 @@ function roundPrice(price: number): number {
   return Number(price.toFixed(7));
 }
 
-export async function runTechnicianAgent(candidate: ScoutCandidate): Promise<TechnicalAnalysisResult> {
+export async function runTechnicianAgent(
+  candidate: ScoutCandidate,
+  modeHint?: TradeMode
+): Promise<TechnicalAnalysisResult> {
   const started = Date.now();
   const klines = await fetchMexcKlines(candidate.symbol, "15m", 60);
   const closed = klines.length > 2 ? klines.slice(0, klines.length - 1) : klines;
@@ -89,15 +98,40 @@ export async function runTechnicianAgent(candidate: ScoutCandidate): Promise<Tec
   const supportLevel = Math.min(...recent20.map((k) => k.low));
   const resistanceLevel = Math.max(...recent20.map((k) => k.high));
 
-  // Risk & Target levels
-  const atrStop = entryPrice - Math.max(atr14 * 1.5, entryPrice * 0.012);
-  const supportStop = supportLevel * 0.996;
-  const rawStop = Math.max(atrStop, supportStop);
-  const stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.988));
+  const atrPct = entryPrice > 0 ? (atr14 / entryPrice) * 100 : 0;
+  const tradeMode: TradeMode =
+    modeHint ?? (ema9 > ema21 * 1.003 && rsi14 >= 45 && rsi14 <= 66 && atrPct >= 0.4 ? "SWING" : "INTRADAY");
 
+  let stopLossPrice: number;
+  let tp1Price: number;
+  let tp2Price: number;
+  let tp3Price: number;
+
+  if (tradeMode === "SWING") {
+    const swingAtrStop = entryPrice - Math.max(atr14 * 2.0, entryPrice * 0.02);
+    const maxSwingFloor = entryPrice * 0.965; // up to -3.5%
+    const supportStop = supportLevel * 0.994;
+    const rawStop = Math.max(maxSwingFloor, Math.min(swingAtrStop, supportStop));
+    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.985));
+
+    const riskPerUnit = Math.max(entryPrice - stopLossPrice, entryPrice * 0.008);
+    tp1Price = roundPrice(entryPrice + riskPerUnit * 1.6);
+    tp2Price = roundPrice(Math.max(entryPrice + riskPerUnit * 2.8, resistanceLevel * 1.015));
+    tp3Price = roundPrice(entryPrice + riskPerUnit * 4.2);
+  } else {
+    const atrStop = entryPrice - Math.max(atr14 * 1.5, entryPrice * 0.012);
+    const supportStop = supportLevel * 0.996;
+    const rawStop = Math.max(atrStop, supportStop);
+    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.988));
+
+    const riskPerUnit = Math.max(entryPrice - stopLossPrice, entryPrice * 0.005);
+    tp1Price = roundPrice(entryPrice + riskPerUnit * 1.3);
+    tp2Price = roundPrice(Math.max(entryPrice + riskPerUnit * 2.2, resistanceLevel * 1.01));
+    tp3Price = roundPrice(entryPrice + riskPerUnit * 3.2);
+  }
+
+  const takeProfitPrice = tp2Price;
   const riskPerUnit = Math.max(entryPrice - stopLossPrice, entryPrice * 0.005);
-  const targetByRR = entryPrice + riskPerUnit * 2.4;
-  const takeProfitPrice = roundPrice(Math.max(targetByRR, resistanceLevel * 1.01));
   const riskRewardRatio = Number(((takeProfitPrice - entryPrice) / riskPerUnit).toFixed(2));
 
   // Score (0-100)
@@ -105,24 +139,28 @@ export async function runTechnicianAgent(candidate: ScoutCandidate): Promise<Tec
   if (ema9 > ema21) techScore += 20;
   if (entryPrice >= ema9) techScore += 10;
   if (rsi14 >= 42 && rsi14 <= 68) techScore += 20;
-  else if (rsi14 > 76) techScore -= 25;
+  else if (rsi14 > 76) techScore -= 15;
   if (riskRewardRatio >= 2.0) techScore += 10;
   techScore = Math.max(0, Math.min(100, Math.round(techScore)));
 
-  const isBullishTrend = ema9 >= ema21 * 0.997 && rsi14 <= 76 && rsi14 >= 32;
+  const isBullishTrend = ema9 >= ema21 * 0.997 && rsi14 >= 32;
   const direction: "LONG" | "SKIP" = isBullishTrend ? "LONG" : "SKIP";
 
   const summary =
     direction === "LONG"
-      ? `EMA9/21 ijobiy, RSI=${rsi14}, R:R=1:${riskRewardRatio}`
+      ? `${tradeMode} EMA9/21 ijobiy, RSI=${rsi14}, R:R=1:${riskRewardRatio}`
       : `Texnik shart yetarli emas (RSI=${rsi14}, EMA9=${roundPrice(ema9)} vs EMA21=${roundPrice(ema21)})`;
 
   return {
     symbol: candidate.symbol,
     direction,
+    tradeMode,
     entryPrice: roundPrice(entryPrice),
     stopLossPrice,
     takeProfitPrice,
+    tp1Price,
+    tp2Price,
+    tp3Price,
     riskRewardRatio,
     rsi14,
     ema9: roundPrice(ema9),

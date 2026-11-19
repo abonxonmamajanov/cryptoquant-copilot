@@ -14,8 +14,11 @@ import {
   buildTradingViewMexcUrl
 } from "../utils/exchangeLinks";
 import {
+  getActiveSignalMode,
   LEGAL_DISCLAIMER_UZ,
   RiskProfile,
+  setActiveSignalMode,
+  SignalMode,
   SUBSCRIPTION_PLANS,
   updateSubscriberRisk,
   upsertSubscriber
@@ -34,11 +37,22 @@ function buildMainMenu(): InlineKeyboard {
     .text("📊 Jonli Statistika", "menu_stats")
     .text("🔍 Oxirgi Signallar", "menu_signals")
     .row()
-    .text("💎 Tariflar (Free/Pro/VIP)", "menu_plans")
+    .text("🔀 Rejim (/mode)", "menu_mode")
     .text("📄 PDF Hisobot", "menu_pdf")
     .row()
+    .text("💎 Tariflar (Free/Pro/VIP)", "menu_plans")
     .text("⚙️ Risk Profili", "menu_risk")
+    .row()
     .text("⚠️ Ogohlantirish", "menu_disclaimer");
+}
+
+function buildModeKeyboard(current: SignalMode): InlineKeyboard {
+  const mark = (m: SignalMode) => (current === m ? "✅ " : "");
+  return new InlineKeyboard()
+    .text(`${mark("HYBRID")}🔀 HYBRID (Intraday + Swing)`, "mode_HYBRID")
+    .row()
+    .text(`${mark("INTRADAY")}⚡ INTRADAY (15M)`, "mode_INTRADAY")
+    .text(`${mark("SWING")}🏔️ SWING (4H)`, "mode_SWING");
 }
 
 function formatStatsText(): string {
@@ -47,9 +61,11 @@ function formatStatsText(): string {
   return [
     `📊 *CryptoQuant-Copilot — Jonli Demo Statistika*`,
     ``,
+    `🔀 *Faol Rejim:* \`${getActiveSignalMode()}\``,
     `💰 *Balans:* $${s.currentBalanceUsd.toFixed(2)} (Boshlang'ich: $${s.initialBalanceUsd})`,
     `📈 *Umumiy PnL:* ${sign}$${s.totalPnlUsd.toFixed(2)} (${sign}${s.totalPnlPct}%)`,
     `🎯 *Win Rate:* ${s.winRatePct}% (${s.winningTrades} foyda / ${s.losingTrades} zarar)`,
+    `⚡ *Intraday:* ${s.intradayStats.winRatePct}% (${s.intradayStats.wins}/${s.intradayStats.total}) | 🏔️ *Swing:* ${s.swingStats.winRatePct}% (${s.swingStats.wins}/${s.swingStats.total})`,
     `📂 *Ochiq pozitsiyalar:* ${s.openTradesCount} ta | *Yopilgan:* ${s.closedTradesCount} ta`,
     `🛡️ *Max Drawdown:* ${s.maxDrawdownPct}%`,
     ``,
@@ -64,15 +80,16 @@ function formatLatestSignalsText(): string {
   }
 
   const lines = [
-    `🔍 *Oxirgi 5-Agent Tahlili (${snap.evaluatedCount} ta koin)*`,
+    `🔍 *Oxirgi 5-Agent Tahlili (${snap.evaluatedCount} ta koin | Rejim: ${getActiveSignalMode()})*`,
     `✅ Tasdiqlangan: ${snap.approvedCount} | ❌ Rad etilgan: ${snap.rejectedCount}`,
     ``
   ];
 
   for (const r of snap.records) {
     const icon = r.criticRisk.verdict === "APPROVE" ? "✅" : "❌";
+    const modeTag = r.criticRisk.tradeMode === "SWING" ? "🏔️" : "⚡";
     lines.push(
-      `${icon} *${r.scout.symbol}* — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
+      `${icon}${modeTag} *${r.scout.symbol}* — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
     );
   }
   return lines.join("\n");
@@ -135,8 +152,25 @@ export function startTelegramBot(): void {
       const uid = String(ctx.from?.id ?? "unknown");
       const user = upsertSubscriber(uid, ctx.from?.username ?? null, ctx.from?.first_name ?? null);
       await ctx.reply(
-        `Assalomu alaykum, *${user.firstName || "Treyder"}*! 👋\n\n*CryptoQuant-Copilot* — 5 ta mustaqil agentdan iborat MEXC Spot kripto-signal tizimiga xush kelibsiz.\n\n📌 Tarifingiz: *${user.tier}* | Risk profili: *${user.riskProfile}*\n🔎 Istalgan koinni tekshirish uchun \`SOL\`, \`BTC\` yoki \`/check HYPE\` yozing.`,
+        `Assalomu alaykum, *${user.firstName || "Treyder"}*! 👋\n\n*CryptoQuant-Copilot* — 5 ta mustaqil agentdan iborat MEXC Spot kripto-signal tizimiga xush kelibsiz.\n\n📌 Tarifingiz: *${user.tier}* | Risk: *${user.riskProfile}* | Rejim: *${getActiveSignalMode()}*\n🔎 Istalgan koinni tekshirish uchun \`SOL\`, \`BTC\` yoki \`/check HYPE\` yozing.`,
         { parse_mode: "Markdown", reply_markup: buildMainMenu() }
+      );
+    });
+
+    bot.command("mode", async (ctx) => {
+      const arg = (ctx.match || "").trim().toUpperCase();
+      if (arg === "HYBRID" || arg === "INTRADAY" || arg === "SWING") {
+        const updated = setActiveSignalMode(arg, String(ctx.from?.id ?? "unknown"));
+        await ctx.reply(`✅ Signal rejimi *${updated}* ga o'zgartirildi.`, {
+          parse_mode: "Markdown",
+          reply_markup: buildMainMenu()
+        });
+        return;
+      }
+      const current = getActiveSignalMode();
+      await ctx.reply(
+        `🔀 *Signal Rejimini Tanlang* (Hozirgi: *${current}*)\n\n• *HYBRID:* Intraday (15M) + Swing (4H) signallari\n• *INTRADAY:* Faqat tezkor 15M signallar\n• *SWING:* Faqat kuchli 1H/4H trenddagi Swing signallar`,
+        { parse_mode: "Markdown", reply_markup: buildModeKeyboard(current) }
       );
     });
 
@@ -164,14 +198,15 @@ export function startTelegramBot(): void {
       try {
         const snap = await triggerPipelineRunNow();
         const lines = [
-          `✅ *Jonli 5-Agent Skanerlash Tugadi* (${snap.durationMs}ms)`,
+          `✅ *Jonli 5-Agent Skanerlash Tugadi* (${snap.durationMs}ms | Rejim: ${snap.activeSignalMode})`,
           `📊 Tahlil: ${snap.evaluatedCount} | ✅ Tasdiqlangan: ${snap.approvedCount} | ❌ Rad etilgan: ${snap.rejectedCount}`,
           ``
         ];
         for (const r of snap.records) {
           const icon = r.criticRisk.verdict === "APPROVE" ? "✅" : "❌";
+          const modeTag = r.criticRisk.tradeMode === "SWING" ? "🏔️" : "⚡";
           lines.push(
-            `${icon} *${r.scout.symbol}* — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
+            `${icon}${modeTag} *${r.scout.symbol}* — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
           );
         }
         await ctx.reply(lines.join("\n"), { parse_mode: "Markdown", reply_markup: buildMainMenu() });
@@ -214,6 +249,26 @@ export function startTelegramBot(): void {
       const buf = await generatePortfolioPdfBuffer(summary);
       await ctx.replyWithDocument(new InputFile(buf, "cryptoquant-report.pdf"), {
         caption: `📄 CryptoQuant-Copilot jonli PDF hisoboti | Balans: $${summary.currentBalanceUsd.toFixed(2)} | Win Rate: ${summary.winRatePct}%`
+      });
+    });
+
+    // Mode switcher callbacks
+    bot.callbackQuery("menu_mode", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const current = getActiveSignalMode();
+      await ctx.reply(
+        `🔀 *Signal Rejimini Tanlang* (Hozirgi: *${current}*)\n\n• *HYBRID:* Intraday (15M) + Swing (4H)\n• *INTRADAY:* Faqat 15M signallar\n• *SWING:* Faqat 1H/4H Swing signallar`,
+        { parse_mode: "Markdown", reply_markup: buildModeKeyboard(current) }
+      );
+    });
+
+    bot.callbackQuery(/^mode_(HYBRID|INTRADAY|SWING)$/, async (ctx) => {
+      const chosen = ctx.match[1] as SignalMode;
+      setActiveSignalMode(chosen, String(ctx.from?.id ?? "unknown"));
+      await ctx.answerCallbackQuery(`Rejim: ${chosen}`);
+      await ctx.reply(`✅ Signal rejimi *${chosen}* ga o'zgartirildi.`, {
+        parse_mode: "Markdown",
+        reply_markup: buildMainMenu()
       });
     });
 
@@ -282,7 +337,7 @@ export function startTelegramBot(): void {
         await ctx.replyWithPhoto(new InputFile(png1h, `${symbol}-1h.png`), {
           caption: [
             `📊 *\`${symbol}\` — 1H Grafik (MEXC Spot)*`,
-            `🎯 Entry: \`${tech.entryPrice}\` | ✅ TP: \`${tech.takeProfitPrice}\` | 🛑 SL: \`${tech.stopLossPrice}\``,
+            `🎯 Entry: \`${tech.entryPrice}\` | ✅ TP1: \`${tech.tp1Price ?? tech.takeProfitPrice}\` | TP2: \`${tech.takeProfitPrice}\` | 🛑 SL: \`${tech.stopLossPrice}\``,
             `⚖️ R:R: 1:${tech.riskRewardRatio} | Qaror: *${critic.verdict}* (${critic.confidenceScore}/100)`
           ].join("\n"),
           parse_mode: "Markdown",

@@ -6,6 +6,7 @@ import { runCriticRiskAgent } from "../agents/criticRisk.agent";
 import { formatEntryZoneRange } from "../agents/executive.agent";
 import { EvaluatedSignalRecord } from "./pipeline.service";
 import { generate15mChartPng } from "./chartGenerator.service";
+import { runFundamentalShield } from "./fundamental.service";
 
 export interface TokenCheckResult {
   symbol: string;
@@ -91,17 +92,19 @@ export async function analyzeTokenOnDemand(rawInput: string): Promise<TokenCheck
     detectedAt: new Date().toISOString()
   };
 
-  const [technician, macroFlow] = await Promise.all([
+  const [technician, macroFlow, fundamental] = await Promise.all([
     runTechnicianAgent(scout),
-    runMacroFlowAgent(symbol)
+    runMacroFlowAgent(symbol),
+    runFundamentalShield(symbol)
   ]);
 
-  const criticRisk = runCriticRiskAgent(scout, technician, macroFlow);
+  const criticRisk = runCriticRiskAgent(scout, technician, macroFlow, fundamental);
 
   const record: EvaluatedSignalRecord = {
     scout,
     technician,
     macroFlow,
+    fundamental,
     criticRisk,
     executive: null
   };
@@ -115,18 +118,26 @@ export async function analyzeTokenOnDemand(rawInput: string): Promise<TokenCheck
     timeframeLabel: "15M"
   });
 
-  const verdictBadge = criticRisk.verdict === "APPROVE" ? "✅ TASDIQLANDI (APPROVE)" : "❌ RAD ETILDI (REJECT)";
+  const verdictBadge =
+    criticRisk.verdict === "APPROVE" ? "✅ TASDIQLANDI (APPROVE)" : "❌ RAD ETILDI (REJECT)";
+  const tradeMode = criticRisk.tradeMode ?? technician.tradeMode ?? "INTRADAY";
+  const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
   const entryZone = formatEntryZoneRange(technician.entryPrice);
+  const fngStr = fundamental.fearGreed
+    ? ` | F&G: ${fundamental.fearGreed.value}`
+    : "";
 
   const caption = [
-    `🔎 *CRYPTOQUANT-COPILOT — 5-AGENT TAHLIL*`,
+    `🔎 *CRYPTOQUANT-COPILOT* | ${modeHeader}`,
     ``,
-    `🪙 *Juftlik:* \`${symbol}\` (MEXC Spot | 15M)`,
-    `📊 *Qaror:* ${verdictBadge} | *Ishonch:* ${criticRisk.confidenceScore}/100`,
+    `🪙 *Juftlik:* \`${symbol}\` (MEXC Spot)`,
+    `📊 *Qaror:* ${verdictBadge} | *Ishonch:* ${criticRisk.confidenceScore}/100${criticRisk.longTermStars ? ` | ${criticRisk.longTermStars.label}` : ""}`,
     ``,
     `🎯 *Kirish (Entry):* \`${technician.entryPrice}\``,
     `📍 *Kirish zonasi:* \`${entryZone}\``,
-    `✅ *Take-Profit (TP):* \`${technician.takeProfitPrice}\``,
+    `✅ *TP1 (Breakeven):* \`${technician.tp1Price ?? technician.takeProfitPrice}\``,
+    `✅ *TP2 (Asosiy):* \`${technician.tp2Price ?? technician.takeProfitPrice}\``,
+    `🚀 *TP3 (Max):* \`${technician.tp3Price ?? technician.takeProfitPrice}\``,
     `🛑 *Stop-Loss (SL):* \`${technician.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${technician.riskRewardRatio}`,
     ``,
@@ -135,6 +146,7 @@ export async function analyzeTokenOnDemand(rawInput: string): Promise<TokenCheck
     `• *Technician:* ${technician.summary}`,
     `• *Macro & Flow:* ${macroFlow.summary} (${macroFlow.regime})`,
     `• *Critic:* ${criticRisk.reasons.slice(0, 2).join("; ")}`,
+    `🛡️ *Fundamental:* ${fundamental.badgeUz}${fngStr}`,
     ``,
     `⚠️ _Moliyaviy maslahat emas. Riskni o'zingiz boshqaring._`
   ].join("\n");

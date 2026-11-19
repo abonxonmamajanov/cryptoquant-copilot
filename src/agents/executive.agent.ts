@@ -5,6 +5,7 @@ import { TechnicalAnalysisResult } from "./technician.agent";
 import { MacroFlowResult } from "./macroFlow.agent";
 import { CriticRiskResult } from "./criticRisk.agent";
 import type { DemoTradeItem } from "../services/demoPortfolio.service";
+import type { FundamentalReport } from "../services/fundamental.service";
 import { buildTelegramSignalReplyMarkup } from "../utils/exchangeLinks";
 import { fetchMexcKlines } from "../services/mexcClient.service";
 import { generate15mChartPng } from "../services/chartGenerator.service";
@@ -41,18 +42,32 @@ export function formatTelegramSignalCard(
   scout: ScoutCandidate,
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
-  critic: CriticRiskResult
+  critic: CriticRiskResult,
+  fundamental?: FundamentalReport
 ): string {
   const entryZone = formatEntryZoneRange(tech.entryPrice);
-  return [
-    `🚀 *CRYPTOQUANT-COPILOT SIGNAL*`,
+  const tradeMode = critic.tradeMode ?? tech.tradeMode ?? "INTRADAY";
+  const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
+  const tp1 = tech.tp1Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 0.55);
+  const tp2 = tech.tp2Price ?? tech.takeProfitPrice;
+  const tp3 = tech.tp3Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.45);
+  const fngText = fundamental?.fearGreed
+    ? ` | F&G: ${fundamental.fearGreed.value} (${fundamental.fearGreed.classification})`
+    : "";
+  const fundLine = fundamental ? `🛡️ *Fundamental:* ${fundamental.badgeUz}${fngText}` : null;
+  const starsText = critic.longTermStars ? ` | ${critic.longTermStars.label}` : "";
+
+  const lines = [
+    `🚀 *CRYPTOQUANT-COPILOT SIGNAL* | ${modeHeader}`,
     ``,
     `🪙 *Juftlik:* \`${scout.symbol}\` (MEXC Spot)`,
-    `📊 *Yo'nalish:* LONG | *Ishonch:* ${critic.confidenceScore}/100`,
+    `📊 *Yo'nalish:* LONG | *Ishonch:* ${critic.confidenceScore}/100${starsText}`,
     ``,
     `🎯 *Kirish (Entry):* \`${tech.entryPrice}\``,
     `📍 *Kirish zonasi (Entry Zone):* \`${entryZone}\``,
-    `✅ *Take-Profit (TP):* \`${tech.takeProfitPrice}\``,
+    `✅ *TP1 (Breakeven):* \`${tp1}\``,
+    `✅ *TP2 (Asosiy):* \`${tp2}\``,
+    `🚀 *TP3 (Max):* \`${tp3}\``,
     `🛑 *Stop-Loss (SL):* \`${tech.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${tech.riskRewardRatio}`,
     ``,
@@ -60,35 +75,65 @@ export function formatTelegramSignalCard(
     `• *Scout:* 24s ${scout.priceChange24hPct >= 0 ? "+" : ""}${scout.priceChange24hPct}% | 15m hajm ${scout.volumeSpikeRatio15m}x`,
     `• *Technician:* ${tech.summary}`,
     `• *Macro & Flow:* ${macro.summary} (${macro.regime})`,
-    `• *Critic:* TASDIQLANDI (${critic.reasons[0]})`,
+    `• *Critic:* TASDIQLANDI (${critic.reasons[0]})`
+  ];
+
+  if (fundLine) {
+    lines.push(fundLine);
+  }
+  if (critic.softWarnings && critic.softWarnings.length > 0) {
+    lines.push(`⚠️ *Ehtiyot eslatma:* ${critic.softWarnings.slice(0, 2).join("; ")}`);
+  }
+
+  lines.push(``, `⚠️ _Moliyaviy maslahat emas. Riskni o'zingiz boshqaring._`);
+  return lines.join("\n");
+}
+
+export function formatTp1BreakevenCard(trade: DemoTradeItem): string {
+  return [
+    `🎯 *TP1 URILDI (${trade.symbol})* — SL kirish narxiga (*Breakeven:* \`${trade.entryPrice}\`) surildi!`,
     ``,
-    `⚠️ _Moliyaviy maslahat emas. Riskni o'zingiz boshqaring._`
+    `🪙 *Juftlik:* \`${trade.symbol}\` (${trade.tradeMode})`,
+    `✅ *TP1:* \`${trade.tp1Price}\` | 🎯 *Keyingi maqsad (TP2):* \`${trade.tp2Price}\` | 🚀 *TP3:* \`${trade.tp3Price}\``,
+    `🛡️ *Yangi Stop-Loss:* \`${trade.entryPrice}\` (Risk = 0)`
   ].join("\n");
 }
 
 export function formatTradeClosedCard(trade: DemoTradeItem): string {
   const icon =
-    trade.status === "TP_HIT" ? "✅" : trade.status === "SL_HIT" ? "🛑" : "⏱️";
+    trade.status === "TP_HIT"
+      ? "✅"
+      : trade.status === "BREAKEVEN_EXIT"
+        ? "🛡️"
+        : trade.status === "SL_HIT"
+          ? "🛑"
+          : "⏱️";
   const label =
     trade.status === "TP_HIT"
       ? "TAKE-PROFIT URILDI (TP_HIT)"
-      : trade.status === "SL_HIT"
-        ? "STOP-LOSS URILDI (SL_HIT)"
-        : "MUDDAT TUGADI (EXPIRED)";
+      : trade.status === "BREAKEVEN_EXIT"
+        ? "BREAKEVEN YOPILDI (0 ZARAR)"
+        : trade.status === "SL_HIT"
+          ? "STOP-LOSS URILDI (SL_HIT)"
+          : "MUDDAT TUGADI (EXPIRED)";
   const pnlPct = trade.pnlPercent ?? 0;
   const pnlUsd = trade.pnlUsd ?? 0;
   const sign = pnlUsd >= 0 ? "+" : "";
 
-  return [
+  const lines = [
     `${icon} *DEMO SAVDO YOPILDI — ${label}*`,
     ``,
-    `🪙 *Juftlik:* \`${trade.symbol}\` (MEXC Spot)`,
+    `🪙 *Juftlik:* \`${trade.symbol}\` (MEXC Spot | ${trade.tradeMode})`,
     `🎯 *Entry:* \`${trade.entryPrice}\` → *Exit:* \`${trade.exitPrice ?? "-"}\``,
     `💰 *Natija:* ${sign}${pnlPct}% (${sign}$${pnlUsd})`,
-    `📦 *Pozitsiya hajmi:* $${trade.positionSizeUsd}`,
-    ``,
-    `⚠️ _Virtual demo portfel hisoboti._`
-  ].join("\n");
+    `📦 *Pozitsiya hajmi:* $${trade.positionSizeUsd}`
+  ];
+
+  if (trade.slPostMortemReason) {
+    lines.push(`🔎 *Post-Mortem sabab:* ${trade.slPostMortemReason}`);
+  }
+  lines.push(``, `⚠️ _Virtual demo portfel hisoboti._`);
+  return lines.join("\n");
 }
 
 function isConfiguredSecret(val: string): boolean {
@@ -194,9 +239,10 @@ export async function runExecutiveAgent(
   scout: ScoutCandidate,
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
-  critic: CriticRiskResult
+  critic: CriticRiskResult,
+  fundamental?: FundamentalReport
 ): Promise<ExecutiveDispatchResult> {
-  const telegramMessage = formatTelegramSignalCard(scout, tech, macro, critic);
+  const telegramMessage = formatTelegramSignalCard(scout, tech, macro, critic, fundamental);
   const replyMarkup = buildTelegramSignalReplyMarkup(scout.symbol, tech.entryPrice);
 
   let chartPng: Buffer | null = null;
