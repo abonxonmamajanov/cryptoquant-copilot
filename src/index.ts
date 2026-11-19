@@ -1,11 +1,13 @@
 import express from "express";
 import { env } from "./config/env";
 import { runMarketHealthChecks } from "./services/marketHealth.service";
+import { getActiveMexcMirror } from "./services/mexcClient.service";
 import {
   getLatestPipelineSnapshot,
   getLatestScoutSnapshot,
   getSchedulerStats,
   startScoutScheduler,
+  stopScoutScheduler,
   triggerPipelineRunNow,
   triggerScoutScanNow
 } from "./services/scheduler.service";
@@ -17,8 +19,18 @@ import {
   LEGAL_DISCLAIMER_UZ,
   SUBSCRIPTION_PLANS
 } from "./services/subscription.service";
-import { isTelegramBotRunning, startTelegramBot } from "./services/telegramBot.service";
+import {
+  isTelegramBotRunning,
+  startTelegramBot,
+  stopTelegramBot
+} from "./services/telegramBot.service";
 import { renderDashboardHtml } from "./views/dashboard.view";
+import { runHistoricalBacktest } from "./services/backtest.service";
+import {
+  startDailyReportScheduler,
+  stopDailyReportScheduler
+} from "./services/dailyReport.service";
+import { isFilteredOutSymbol } from "./agents/scout.agent";
 
 const app = express();
 app.use(express.json());
@@ -28,11 +40,15 @@ app.get("/", (_req, res) => {
   res.status(200).send(renderDashboardHtml());
 });
 
+app.get("/ping", (_req, res) => {
+  res.status(200).send("pong");
+});
+
 app.get("/health", (_req, res) => {
   const portfolio = getDemoPortfolioSummary();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-4-product-dashboard-bot",
+    stage: "stage-5-production-100",
     status: "ok",
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),
@@ -56,6 +72,41 @@ app.get("/health/markets", async (_req, res) => {
     checks,
     timestamp: new Date().toISOString()
   });
+});
+
+app.get("/api/metrics", (_req, res) => {
+  const memoryRssMb = Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(2));
+  res.status(200).json({
+    uptimeSec: Math.round(process.uptime()),
+    memoryRssMb,
+    activeMirror: getActiveMexcMirror(),
+    scheduler: getSchedulerStats(),
+    portfolio: getDemoPortfolioSummary(),
+    telegramBotRunning: isTelegramBotRunning(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/api/backtest", async (req, res) => {
+  const symbol = String(req.query.symbol || "BTCUSDT").toUpperCase().trim();
+  const parsedLimit = Number(req.query.limit ?? 240);
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 240;
+
+  if (!symbol || isFilteredOutSymbol(symbol)) {
+    res.status(400).json({
+      error: `Symbol ${symbol || "(empty)"} is filtered out (stablecoin, leveraged token, or non-USDT).`
+    });
+    return;
+  }
+
+  try {
+    const result = await runHistoricalBacktest(symbol, limit);
+    res.status(200).json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Backtest error";
+    const status = message.includes("filtered out") || message.includes("Insufficient") ? 400 : 500;
+    res.status(status).json({ error: message });
+  }
 });
 
 app.get("/api/plans", (_req, res) => {
@@ -141,10 +192,42 @@ app.post("/api/reports/pdf/telegram", async (_req, res) => {
 });
 
 if (require.main === module) {
-  app.listen(env.PORT, () => {
-    console.log(`[CryptoQuant-Copilot] Stage 4 server running on port ${env.PORT}`);
+  const server = app.listen(env.PORT, () => {
+    console.log(`[CryptoQuant-Copilot] Stage 5 (100% Production) server running on port ${env.PORT}`);
     startScoutScheduler(60_000);
+    startDailyReportScheduler();
     startTelegramBot();
+  });
+
+  let shuttingDown = false;
+  const gracefulShutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[CryptoQuant-Copilot] Received ${signal}, shutting down cleanly...`);
+
+    stopScoutScheduler();
+    stopDailyReportScheduler();
+
+    try {
+      await stopTelegramBot();
+    } catch (err) {
+      console.error("[Telegram Bot] Error during stop:", err instanceof Error ? err.message : err);
+    }
+
+    const forceExitTimer = setTimeout(() => process.exit(0), 5000);
+    forceExitTimer.unref();
+
+    server.close(() => {
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    });
+  };
+
+  process.on("SIGTERM", () => {
+    void gracefulShutdown("SIGTERM");
+  });
+  process.on("SIGINT", () => {
+    void gracefulShutdown("SIGINT");
   });
 }
 

@@ -3,6 +3,8 @@ import { env } from "../config/env";
 import { getDemoPortfolioSummary } from "./demoPortfolio.service";
 import { getLatestPipelineSnapshot } from "./pipeline.service";
 import { generatePortfolioPdfBuffer } from "./pdfReport.service";
+import { triggerPipelineRunNow } from "./scheduler.service";
+import { sendDailySummaryNow } from "./dailyReport.service";
 import {
   LEGAL_DISCLAIMER_UZ,
   RiskProfile,
@@ -110,6 +112,47 @@ export function startTelegramBot(): void {
 
     bot.command("signals", async (ctx) => {
       await ctx.reply(formatLatestSignalsText(), { parse_mode: "Markdown", reply_markup: buildMainMenu() });
+    });
+
+    bot.command("scan", async (ctx) => {
+      await ctx.reply("🔍 *5-agent jonli skanerlash boshlandi...* Biroz kuting.", { parse_mode: "Markdown" });
+      try {
+        const snap = await triggerPipelineRunNow();
+        const lines = [
+          `✅ *Jonli 5-Agent Skanerlash Tugadi* (${snap.durationMs}ms)`,
+          `📊 Tahlil: ${snap.evaluatedCount} | ✅ Tasdiqlangan: ${snap.approvedCount} | ❌ Rad etilgan: ${snap.rejectedCount}`,
+          ``
+        ];
+        for (const r of snap.records) {
+          const icon = r.criticRisk.verdict === "APPROVE" ? "✅" : "❌";
+          lines.push(
+            `${icon} *${r.scout.symbol}* — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
+          );
+        }
+        await ctx.reply(lines.join("\n"), { parse_mode: "Markdown", reply_markup: buildMainMenu() });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Skanerlash xatosi";
+        await ctx.reply(`❌ Skanerlashda xatolik yuz berdi: ${msg}`);
+      }
+    });
+
+    bot.command("summary", async (ctx) => {
+      try {
+        const res = await sendDailySummaryNow();
+        const sameChat = String(ctx.chat?.id ?? "") === String(env.TELEGRAM_CHANNEL_ID || "").trim();
+        if (sameChat && res.sentText && res.sentPdf) {
+          return;
+        }
+        const summary = getDemoPortfolioSummary();
+        const buf = await generatePortfolioPdfBuffer(summary);
+        await ctx.reply(formatStatsText(), { parse_mode: "Markdown", reply_markup: buildMainMenu() });
+        await ctx.replyWithDocument(new InputFile(buf, "cryptoquant-summary.pdf"), {
+          caption: `📄 CryptoQuant-Copilot Kunlik Xulosa | Balans: $${summary.currentBalanceUsd.toFixed(2)} | Win Rate: ${summary.winRatePct}%`
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Xulosa xatosi";
+        await ctx.reply(`❌ Kunlik xulosani tayyorlashda xatolik: ${msg}`);
+      }
     });
 
     bot.command("plans", async (ctx) => {
