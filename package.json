@@ -1,0 +1,29 @@
+{
+  "name": "cryptoquant-copilot",
+  "version": "0.1.0",
+  "description": "5-Agent Crypto Signal Bot & Screener (MEXC/Binance/CoinGecko)",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "typecheck": "tsc --noEmit",
+    "verify:stage0": "tsx scripts/e2e_stage0_verify.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.0.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "prisma": "^6.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

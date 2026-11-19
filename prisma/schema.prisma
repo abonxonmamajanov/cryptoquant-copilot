@@ -1,0 +1,117 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SignalDirection {
+  LONG
+  SHORT_HEDGE
+}
+
+enum SignalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  TP_HIT
+  SL_HIT
+  EXPIRED
+}
+
+enum AgentName {
+  SCOUT
+  TECHNICIAN
+  MACRO_FLOW
+  CRITIC_RISK
+  EXECUTIVE
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  VIP
+}
+
+model Signal {
+  id              String          @id @default(cuid())
+  symbol          String
+  exchange        String          @default("MEXC")
+  direction       SignalDirection @default(LONG)
+  status          SignalStatus    @default(PENDING)
+  entryPrice      Float
+  takeProfitPrice Float
+  stopLossPrice   Float
+  riskRewardRatio Float
+  confidenceScore Int
+  rejectReason    String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  agentLogs       AgentLog[]
+  demoTrade       DemoTrade?
+
+  @@index([symbol, createdAt])
+  @@index([status])
+}
+
+model AgentLog {
+  id          String    @id @default(cuid())
+  signalId    String
+  agent       AgentName
+  passed      Boolean
+  summary     String
+  payloadJson Json
+  latencyMs   Int
+  createdAt   DateTime  @default(now())
+
+  signal      Signal    @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([signalId, agent])
+}
+
+model DemoPortfolio {
+  id             String      @id @default(cuid())
+  name           String      @default("Main Spot Demo")
+  initialBalance Float       @default(1000)
+  currentBalance Float       @default(1000)
+  totalTrades    Int         @default(0)
+  winningTrades  Int         @default(0)
+  losingTrades   Int         @default(0)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  trades         DemoTrade[]
+}
+
+model DemoTrade {
+  id             String        @id @default(cuid())
+  portfolioId    String
+  signalId       String        @unique
+  positionSize   Float
+  entryPrice     Float
+  exitPrice      Float?
+  pnlUsd         Float?
+  pnlPercent     Float?
+  isOpen         Boolean       @default(true)
+  openedAt       DateTime      @default(now())
+  closedAt       DateTime?
+
+  portfolio      DemoPortfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  signal         Signal        @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([isOpen])
+}
+
+model UserSubscription {
+  id               String           @id @default(cuid())
+  telegramUserId   String           @unique
+  username         String?
+  tier             SubscriptionTier @default(FREE)
+  riskPreference   String           @default("MODERATE")
+  activeUntil      DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+}
