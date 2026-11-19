@@ -111,11 +111,11 @@ export async function runScoutScan(): Promise<ScoutScanSnapshot> {
 
   const evaluated = await mapWithConcurrency(preRanked, 4, async (ticker): Promise<ScoutCandidate | null> => {
     try {
-      const klines = await fetchMexcKlines15m(ticker.symbol, 21);
+      const klines = await fetchMexcKlines15m(ticker.symbol, 22);
       if (klines.length < 10) return null;
 
-      const latest = klines[klines.length - 1];
-      const history = klines.slice(0, klines.length - 1);
+      const latest = klines[klines.length - 2];
+      const history = klines.slice(0, klines.length - 2);
       const avgQuoteVol =
         history.reduce((sum, k) => sum + k.quoteAssetVolume, 0) / Math.max(history.length, 1);
 

@@ -11,7 +11,8 @@
     "prisma:push": "prisma db push",
     "typecheck": "tsc --noEmit",
     "verify:stage0": "tsx scripts/e2e_stage0_verify.ts",
-    "verify:stage1": "tsx scripts/e2e_stage1_verify.ts"
+    "verify:stage1": "tsx scripts/e2e_stage1_verify.ts",
+    "verify:stage2": "tsx scripts/e2e_stage2_verify.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",

@@ -29,6 +29,11 @@ export interface MexcKline {
   quoteAssetVolume: number;
 }
 
+export interface MexcOrderBook {
+  bids: Array<[number, number]>; // [price, qty]
+  asks: Array<[number, number]>; // [price, qty]
+}
+
 export function getActiveMexcMirror(): string {
   return MEXC_MIRRORS[activeMirrorIndex];
 }
@@ -46,7 +51,7 @@ async function fetchWithMirrorFallback<T>(path: string, timeoutMs = 10000): Prom
         timeout: timeoutMs,
         headers: {
           Accept: "application/json",
-          "User-Agent": "CryptoQuant-Copilot/0.2"
+          "User-Agent": "CryptoQuant-Copilot/0.3"
         }
       });
       activeMirrorIndex = idx;
@@ -71,7 +76,8 @@ export async function fetchMexcTickers24h(): Promise<MexcTicker24h[]> {
     .map((item) => ({
       symbol: String(item.symbol || ""),
       lastPrice: Number(item.lastPrice || 0),
-      priceChangePercent: Number(item.priceChangePercent || 0) * (Math.abs(Number(item.priceChangePercent || 0)) < 1 ? 100 : 1),
+      priceChangePercent:
+        Number(item.priceChangePercent || 0) * (Math.abs(Number(item.priceChangePercent || 0)) < 1 ? 100 : 1),
       quoteVolume: Number(item.quoteVolume || 0),
       volume: Number(item.volume || 0),
       highPrice: Number(item.highPrice || 0),
@@ -80,9 +86,13 @@ export async function fetchMexcTickers24h(): Promise<MexcTicker24h[]> {
     .filter((t) => t.symbol.length > 0 && Number.isFinite(t.lastPrice) && t.lastPrice > 0);
 }
 
-export async function fetchMexcKlines15m(symbol: string, limit = 21): Promise<MexcKline[]> {
+export async function fetchMexcKlines(
+  symbol: string,
+  interval: "15m" | "1h" = "15m",
+  limit = 60
+): Promise<MexcKline[]> {
   const raw = await fetchWithMirrorFallback<Array<Array<string | number>>>(
-    `/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=15m&limit=${limit}`,
+    `/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`,
     10000
   );
 
@@ -96,4 +106,20 @@ export async function fetchMexcKlines15m(symbol: string, limit = 21): Promise<Me
     closeTime: Number(k[6]),
     quoteAssetVolume: Number(k[7])
   }));
+}
+
+export async function fetchMexcKlines15m(symbol: string, limit = 22): Promise<MexcKline[]> {
+  return fetchMexcKlines(symbol, "15m", limit);
+}
+
+export async function fetchMexcOrderBook(symbol: string, limit = 20): Promise<MexcOrderBook> {
+  const raw = await fetchWithMirrorFallback<{
+    bids: Array<[string, string]>;
+    asks: Array<[string, string]>;
+  }>(`/api/v3/depth?symbol=${encodeURIComponent(symbol)}&limit=${limit}`, 10000);
+
+  return {
+    bids: (raw.bids || []).map(([p, q]) => [Number(p), Number(q)]),
+    asks: (raw.asks || []).map(([p, q]) => [Number(p), Number(q)])
+  };
 }
