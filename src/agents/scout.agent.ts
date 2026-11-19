@@ -82,9 +82,9 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-export async function runScoutScan(): Promise<ScoutScanSnapshot> {
+export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<ScoutScanSnapshot> {
   const started = Date.now();
-  const allTickers = await fetchMexcTickers24h();
+  const allTickers = preloadedTickers ?? (await fetchMexcTickers24h());
   const usdtTickers = allTickers.filter((t) => t.symbol.endsWith("USDT"));
 
   const eligible: MexcTicker24h[] = [];
