@@ -46,6 +46,8 @@ import {
 import { generate15mChartPng } from "./services/chartGenerator.service";
 import { buildTradingViewMexcUrl } from "./utils/exchangeLinks";
 import { getFiveAgentsLiveStatus } from "./services/agentTelemetry.service";
+import { getSignalTrackerSummary } from "./services/signalTracker.service";
+import { getActiveNewsShield } from "./services/newsShield.service";
 
 const app = express();
 app.use(express.json());
@@ -106,6 +108,14 @@ app.get("/api/agents/status", (_req, res) => {
   res.status(200).json(getFiveAgentsLiveStatus());
 });
 
+app.get("/api/signals/tracker", (_req, res) => {
+  res.status(200).json(getSignalTrackerSummary());
+});
+
+app.get("/api/macro/news", (_req, res) => {
+  res.status(200).json(getActiveNewsShield());
+});
+
 app.get("/api/backtest", async (req, res) => {
   const symbol = String(req.query.symbol || "BTCUSDT").toUpperCase().trim();
   const parsedLimit = Number(req.query.limit ?? 240);
@@ -128,28 +138,38 @@ app.get("/api/backtest", async (req, res) => {
   }
 });
 
-app.get("/api/token/:symbol/check", async (req, res) => {
+async function handleTokenCheckRoute(symbolParam: string, res: express.Response): Promise<void> {
   try {
-    const result = await analyzeTokenOnDemand(req.params.symbol);
+    const result = await analyzeTokenOnDemand(symbolParam);
     res.status(200).json({
       symbol: result.symbol,
       record: result.record,
       caption: result.caption,
-      chartUrl: `/api/token/${encodeURIComponent(result.symbol)}/chart.png`,
+      chartUrl: `/api/chart/${encodeURIComponent(result.symbol)}.png`,
       tradingViewUrl: buildTradingViewMexcUrl(result.symbol, "15")
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Token check error";
-    const status = message.includes("tahlil qilinmaydi") || message.includes("not found") ? 400 : 500;
-    res.status(status).json({ error: message });
+    const isClientErr =
+      message.includes("tahlil qilinmaydi") ||
+      message.includes("not found") ||
+      message.includes("Invalid") ||
+      message.includes("bo'sh") ||
+      message.includes("400") ||
+      message.includes("MEXC request failed");
+    res.status(isClientErr ? 400 : 500).json({ error: message });
   }
-});
+}
 
-app.get("/api/token/:symbol/chart.png", async (req, res) => {
+async function handleTokenChartRoute(
+  symbolParam: string,
+  intervalQuery: unknown,
+  res: express.Response
+): Promise<void> {
   try {
-    const intervalParam = String(req.query.interval || "15m").toLowerCase();
+    const intervalParam = String(intervalQuery || "15m").toLowerCase();
     const is1h = intervalParam === "1h" || intervalParam === "60";
-    const analysis = await analyzeTokenOnDemand(req.params.symbol);
+    const analysis = await analyzeTokenOnDemand(symbolParam);
     let png = analysis.chartPng;
     if (is1h) {
       const klines1h = await fetchMexcKlines(analysis.symbol, "1h", 60);
@@ -169,6 +189,22 @@ app.get("/api/token/:symbol/chart.png", async (req, res) => {
     const message = err instanceof Error ? err.message : "Chart generation error";
     res.status(400).json({ error: message });
   }
+}
+
+app.get("/api/check/:symbol", async (req, res) => {
+  await handleTokenCheckRoute(req.params.symbol, res);
+});
+
+app.get("/api/token/:symbol/check", async (req, res) => {
+  await handleTokenCheckRoute(req.params.symbol, res);
+});
+
+app.get("/api/chart/:symbol.png", async (req, res) => {
+  await handleTokenChartRoute(req.params.symbol, req.query.interval, res);
+});
+
+app.get("/api/token/:symbol/chart.png", async (req, res) => {
+  await handleTokenChartRoute(req.params.symbol, req.query.interval, res);
 });
 
 app.get("/api/plans", (_req, res) => {

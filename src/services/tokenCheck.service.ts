@@ -31,6 +31,9 @@ export function normalizeMexcSymbol(rawInput: string): string {
   return cleaned.endsWith("USDT") ? cleaned : `${cleaned}USDT`;
 }
 
+const TOKEN_CHECK_CACHE_MS = 10_000;
+const tokenCheckInFlight = new Map<string, { promise: Promise<TokenCheckResult>; expiresAt: number }>();
+
 export async function analyzeTokenOnDemand(rawInput: string): Promise<TokenCheckResult> {
   const symbol = normalizeMexcSymbol(rawInput);
   if (isFilteredOutSymbol(symbol)) {
@@ -39,6 +42,21 @@ export async function analyzeTokenOnDemand(rawInput: string): Promise<TokenCheck
     );
   }
 
+  const now = Date.now();
+  const cached = tokenCheckInFlight.get(symbol);
+  if (cached && cached.expiresAt > now) {
+    return cached.promise;
+  }
+
+  const promise = computeTokenOnDemand(symbol).catch((err) => {
+    tokenCheckInFlight.delete(symbol);
+    throw err;
+  });
+  tokenCheckInFlight.set(symbol, { promise, expiresAt: now + TOKEN_CHECK_CACHE_MS });
+  return promise;
+}
+
+async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
   const [ticker, klines15m] = await Promise.all([
     fetchMexcTicker24h(symbol),
     fetchMexcKlines(symbol, "15m", 60)

@@ -15,11 +15,16 @@ import {
   DemoPortfolioSummary,
   DemoTradeItem,
   evaluateOpenDemoTrades,
-  getDemoPortfolioSummary,
-  openDemoTradeFromSignal
+  getDemoPortfolioSummary
 } from "./demoPortfolio.service";
 import { FundamentalReport, runFundamentalShield } from "./fundamental.service";
 import { getActiveSignalMode, SignalMode } from "./subscription.service";
+import {
+  evaluateTrackedSignals,
+  getSignalTrackerSummary,
+  registerDispatchedSignal,
+  SignalMilestoneAlert
+} from "./signalTracker.service";
 
 export interface EvaluatedSignalRecord {
   scout: ScoutCandidate;
@@ -40,6 +45,8 @@ export interface PipelineRunSnapshot {
   rejectedCount: number;
   tp1BreakevenThisRun: DemoTradeItem[];
   closedTradesThisRun: DemoTradeItem[];
+  signalAlertsThisRun: SignalMilestoneAlert[];
+  signalTrackerSummary: ReturnType<typeof getSignalTrackerSummary>;
   portfolioSummary: DemoPortfolioSummary;
   records: EvaluatedSignalRecord[];
 }
@@ -58,11 +65,12 @@ export async function runFiveAgentPipeline(): Promise<{
   const started = Date.now();
   const allTickers = await fetchMexcTickers24h();
 
-  // 1. Evaluate any open Demo Portfolio positions against live prices (TP1 Breakeven + TP2/SL/Expiry)
   const priceMap = new Map<string, number>();
   for (const ticker of allTickers) {
     priceMap.set(ticker.symbol, ticker.lastPrice);
   }
+
+  // 1a. Evaluate user's manually opened Demo Portfolio trades (TP1 Breakeven + TP2/SL/Expiry)
   const tp1BreakevenThisRun: DemoTradeItem[] = [];
   const closedTradesThisRun = evaluateOpenDemoTrades(priceMap, Date.now(), tp1BreakevenThisRun);
 
@@ -71,6 +79,12 @@ export async function runFiveAgentPipeline(): Promise<{
   }
   for (const closedTrade of closedTradesThisRun) {
     await sendTelegramTextMessage(formatTradeClosedCard(closedTrade)).catch(() => {});
+  }
+
+  // 1b. Evaluate ALL dispatched auto-signals in Signal Tracker (TP1/TP2/TP3/Breakeven/SL/Expiry)
+  const signalAlertsThisRun = evaluateTrackedSignals(priceMap);
+  for (const alert of signalAlertsThisRun) {
+    await sendTelegramTextMessage(alert.telegramText).catch(() => {});
   }
 
   // 2. Run Scout Agent reusing the fetched 24h tickers
@@ -116,7 +130,8 @@ export async function runFiveAgentPipeline(): Promise<{
         );
         record.executive = executive;
         markSignalDispatched(candidate.symbol);
-        openDemoTradeFromSignal(record);
+        // Track every dispatched signal automatically; Demo Portfolio remains strictly manual-only
+        registerDispatchedSignal(record);
       } else {
         criticRisk.reasons.push("Cooldown faol — qayta yuborilmadi");
       }
@@ -139,6 +154,8 @@ export async function runFiveAgentPipeline(): Promise<{
     rejectedCount,
     tp1BreakevenThisRun,
     closedTradesThisRun,
+    signalAlertsThisRun,
+    signalTrackerSummary: getSignalTrackerSummary(),
     portfolioSummary: getDemoPortfolioSummary(),
     records
   };
