@@ -15,6 +15,9 @@ export function buildTelegramSignalReplyMarkup(rawSymbol: string, entryPrice: nu
       [
         { text: "📊 1H Grafik", callback_data: `sig_1h:${symbol}` },
         { text: "🧪 Backtest", callback_data: `sig_bt:${symbol}` }
+      ],
+      [
+        { text: "🛒 Demoda sotib olish ($100)", callback_data: `demo_buy:${symbol}:100` }
       ]
     ]
   };

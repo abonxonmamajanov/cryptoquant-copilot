@@ -3,12 +3,21 @@ import path from "path";
 import { EvaluatedSignalRecord } from "./pipeline.service";
 import type { TradeMode } from "../agents/technician.agent";
 
-export type DemoTradeStatus = "OPEN" | "TP_HIT" | "SL_HIT" | "BREAKEVEN_EXIT" | "EXPIRED";
+export type DemoTradeStatus =
+  | "OPEN"
+  | "TP_HIT"
+  | "SL_HIT"
+  | "BREAKEVEN_EXIT"
+  | "EXPIRED"
+  | "MANUAL_CLOSE";
+
+export type DemoTradeSource = "AUTO" | "MANUAL";
 
 export interface DemoTradeItem {
   id: string;
   symbol: string;
   exchange: "MEXC";
+  source: DemoTradeSource;
   tradeMode: TradeMode;
   entryPrice: number;
   takeProfitPrice: number;
@@ -71,6 +80,12 @@ export interface DemoPortfolioSummary {
   updatedAt: string;
 }
 
+export interface ManualTradeActionResult {
+  ok: boolean;
+  trade?: DemoTradeItem;
+  error?: string;
+}
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const STATE_FILE = path.join(DATA_DIR, "demo_portfolio.json");
 const MAX_OPEN_TRADES = 5;
@@ -106,7 +121,10 @@ function getOptionalPrisma(): {
   } | null;
 }
 
-function syncSignalToPostgresNonBlocking(trade: DemoTradeItem, status: "APPROVED" | "TP_HIT" | "SL_HIT" | "EXPIRED"): void {
+function syncSignalToPostgresNonBlocking(
+  trade: DemoTradeItem,
+  status: "APPROVED" | "TP_HIT" | "SL_HIT" | "EXPIRED"
+): void {
   try {
     const prisma = getOptionalPrisma();
     if (!prisma) return;
@@ -156,6 +174,7 @@ function normalizeLoadedTrade(t: Partial<DemoTradeItem>): DemoTradeItem {
     id: String(t.id ?? `demo_${Date.now()}`),
     symbol: String(t.symbol ?? ""),
     exchange: "MEXC",
+    source: t.source === "MANUAL" ? "MANUAL" : "AUTO",
     tradeMode: t.tradeMode === "SWING" ? "SWING" : "INTRADAY",
     entryPrice: entry,
     takeProfitPrice: tp,
@@ -217,17 +236,11 @@ function classifySlPostMortem(trade: DemoTradeItem): string {
   return "Bozor volatilligi / soxta impuls";
 }
 
-export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTradeItem | null {
-  if (record.criticRisk.verdict !== "APPROVE") return null;
-
-  const alreadyOpen = portfolioState.openTrades.some((t) => t.symbol === record.scout.symbol);
-  if (alreadyOpen) return null;
-  if (portfolioState.openTrades.length >= MAX_OPEN_TRADES) return null;
-
-  const positionSizeUsd = Number(
-    Math.max(25, portfolioState.currentBalanceUsd * POSITION_ALLOCATION_PCT).toFixed(2)
-  );
-
+function buildDemoTradeItem(
+  record: EvaluatedSignalRecord,
+  positionSizeUsd: number,
+  source: DemoTradeSource
+): DemoTradeItem {
   const entry = record.technician.entryPrice;
   const tp2 = record.technician.tp2Price ?? record.technician.takeProfitPrice;
   const risk = Math.max(entry - record.technician.stopLossPrice, entry * 0.005);
@@ -236,10 +249,11 @@ export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTrad
   const tradeMode: TradeMode =
     record.criticRisk.tradeMode ?? record.technician.tradeMode ?? "INTRADAY";
 
-  const trade: DemoTradeItem = {
+  return {
     id: `demo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     symbol: record.scout.symbol,
     exchange: "MEXC",
+    source,
     tradeMode,
     entryPrice: entry,
     takeProfitPrice: tp2,
@@ -263,11 +277,123 @@ export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTrad
     openedAt: new Date().toISOString(),
     closedAt: null
   };
+}
 
+function applyClosedTradePnl(trade: DemoTradeItem, exitPrice: number, status: DemoTradeStatus, now = Date.now()): void {
+  const pnlPercent = Number((((exitPrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2));
+  const pnlUsd = Number(((trade.positionSizeUsd * pnlPercent) / 100).toFixed(2));
+
+  trade.status = status;
+  trade.exitPrice = exitPrice;
+  trade.pnlPercent = pnlPercent;
+  trade.pnlUsd = pnlUsd;
+  trade.closedAt = new Date(now).toISOString();
+
+  portfolioState.currentBalanceUsd = Number((portfolioState.currentBalanceUsd + pnlUsd).toFixed(2));
+  if (portfolioState.currentBalanceUsd > portfolioState.peakBalanceUsd) {
+    portfolioState.peakBalanceUsd = portfolioState.currentBalanceUsd;
+  }
+  const dd =
+    portfolioState.peakBalanceUsd > 0
+      ? ((portfolioState.peakBalanceUsd - portfolioState.currentBalanceUsd) /
+          portfolioState.peakBalanceUsd) *
+        100
+      : 0;
+  if (dd > portfolioState.maxDrawdownPct) {
+    portfolioState.maxDrawdownPct = Number(dd.toFixed(2));
+  }
+
+  portfolioState.closedTrades.unshift(trade);
+}
+
+export function openDemoTradeFromSignal(record: EvaluatedSignalRecord): DemoTradeItem | null {
+  if (record.criticRisk.verdict !== "APPROVE") return null;
+
+  const alreadyOpen = portfolioState.openTrades.some((t) => t.symbol === record.scout.symbol);
+  if (alreadyOpen) return null;
+  if (portfolioState.openTrades.length >= MAX_OPEN_TRADES) return null;
+
+  const positionSizeUsd = Number(
+    Math.max(25, portfolioState.currentBalanceUsd * POSITION_ALLOCATION_PCT).toFixed(2)
+  );
+
+  const trade = buildDemoTradeItem(record, positionSizeUsd, "AUTO");
   portfolioState.openTrades.push(trade);
   persistState();
   syncSignalToPostgresNonBlocking(trade, "APPROVED");
   return trade;
+}
+
+export function openManualDemoTrade(
+  record: EvaluatedSignalRecord,
+  customSizeUsd?: number
+): ManualTradeActionResult {
+  const symbol = record.scout.symbol.toUpperCase().trim();
+  const alreadyOpen = portfolioState.openTrades.some((t) => t.symbol === symbol);
+  if (alreadyOpen) {
+    return {
+      ok: false,
+      error: "Bu koin allaqachon ochiq pozitsiyada bor"
+    };
+  }
+
+  if (portfolioState.currentBalanceUsd < 10) {
+    return {
+      ok: false,
+      error: `Demo balans yetarli emas ($${portfolioState.currentBalanceUsd.toFixed(2)} < $10)`
+    };
+  }
+
+  let positionSizeUsd: number;
+  if (customSizeUsd !== undefined && customSizeUsd !== null) {
+    const parsed = Number(customSizeUsd);
+    if (!Number.isFinite(parsed) || parsed < 10 || parsed > portfolioState.currentBalanceUsd) {
+      return {
+        ok: false,
+        error: `Pozitsiya hajmi $10 dan $${portfolioState.currentBalanceUsd.toFixed(2)} gacha bo'lishi kerak`
+      };
+    }
+    positionSizeUsd = Number(parsed.toFixed(2));
+  } else {
+    positionSizeUsd = Number(Math.min(100, portfolioState.currentBalanceUsd).toFixed(2));
+  }
+
+  const trade = buildDemoTradeItem(record, positionSizeUsd, "MANUAL");
+  portfolioState.openTrades.push(trade);
+  persistState();
+  syncSignalToPostgresNonBlocking(trade, "APPROVED");
+  return { ok: true, trade };
+}
+
+export function closeDemoTradeManually(
+  tradeIdOrSymbol: string,
+  livePrice: number
+): ManualTradeActionResult {
+  if (!Number.isFinite(livePrice) || livePrice <= 0) {
+    return { ok: false, error: "Jonli narx noto'g'ri" };
+  }
+
+  const key = tradeIdOrSymbol.trim();
+  const upperKey = key.toUpperCase();
+  const normalizedSym = upperKey.endsWith("USDT") ? upperKey : `${upperKey}USDT`;
+
+  const idx = portfolioState.openTrades.findIndex(
+    (t) => t.id === key || t.symbol === upperKey || t.symbol === normalizedSym
+  );
+
+  if (idx === -1) {
+    return {
+      ok: false,
+      error: `Ochiq demo pozitsiya topilmadi: ${upperKey}`
+    };
+  }
+
+  const [trade] = portfolioState.openTrades.splice(idx, 1);
+  applyClosedTradePnl(trade, livePrice, "MANUAL_CLOSE");
+  persistState();
+  syncSignalToPostgresNonBlocking(trade, (trade.pnlUsd ?? 0) >= 0 ? "TP_HIT" : "SL_HIT");
+
+  return { ok: true, trade };
 }
 
 export function evaluateOpenDemoTrades(
@@ -324,30 +450,7 @@ export function evaluateOpenDemoTrades(
       continue;
     }
 
-    const pnlPercent = Number((((exitPrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2));
-    const pnlUsd = Number(((trade.positionSizeUsd * pnlPercent) / 100).toFixed(2));
-
-    trade.status = closeStatus;
-    trade.exitPrice = exitPrice;
-    trade.pnlPercent = pnlPercent;
-    trade.pnlUsd = pnlUsd;
-    trade.closedAt = new Date(now).toISOString();
-
-    portfolioState.currentBalanceUsd = Number((portfolioState.currentBalanceUsd + pnlUsd).toFixed(2));
-    if (portfolioState.currentBalanceUsd > portfolioState.peakBalanceUsd) {
-      portfolioState.peakBalanceUsd = portfolioState.currentBalanceUsd;
-    }
-    const dd =
-      portfolioState.peakBalanceUsd > 0
-        ? ((portfolioState.peakBalanceUsd - portfolioState.currentBalanceUsd) /
-            portfolioState.peakBalanceUsd) *
-          100
-        : 0;
-    if (dd > portfolioState.maxDrawdownPct) {
-      portfolioState.maxDrawdownPct = Number(dd.toFixed(2));
-    }
-
-    portfolioState.closedTrades.unshift(trade);
+    applyClosedTradePnl(trade, exitPrice, closeStatus, now);
     newlyClosed.push(trade);
     mutated = true;
 

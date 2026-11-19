@@ -105,17 +105,21 @@ export function formatTradeClosedCard(trade: DemoTradeItem): string {
       ? "✅"
       : trade.status === "BREAKEVEN_EXIT"
         ? "🛡️"
-        : trade.status === "SL_HIT"
-          ? "🛑"
-          : "⏱️";
+        : trade.status === "MANUAL_CLOSE"
+          ? "🔴"
+          : trade.status === "SL_HIT"
+            ? "🛑"
+            : "⏱️";
   const label =
     trade.status === "TP_HIT"
       ? "TAKE-PROFIT URILDI (TP_HIT)"
       : trade.status === "BREAKEVEN_EXIT"
         ? "BREAKEVEN YOPILDI (0 ZARAR)"
-        : trade.status === "SL_HIT"
-          ? "STOP-LOSS URILDI (SL_HIT)"
-          : "MUDDAT TUGADI (EXPIRED)";
+        : trade.status === "MANUAL_CLOSE"
+          ? "QO'LDA YOPILDI (MANUAL_CLOSE)"
+          : trade.status === "SL_HIT"
+            ? "STOP-LOSS URILDI (SL_HIT)"
+            : "MUDDAT TUGADI (EXPIRED)";
   const pnlPct = trade.pnlPercent ?? 0;
   const pnlUsd = trade.pnlUsd ?? 0;
   const sign = pnlUsd >= 0 ? "+" : "";

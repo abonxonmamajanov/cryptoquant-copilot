@@ -1,7 +1,11 @@
 import express from "express";
 import { env } from "./config/env";
 import { runMarketHealthChecks } from "./services/marketHealth.service";
-import { getActiveMexcMirror } from "./services/mexcClient.service";
+import {
+  fetchMexcKlines,
+  fetchMexcTickerPrice,
+  getActiveMexcMirror
+} from "./services/mexcClient.service";
 import {
   getLatestPipelineSnapshot,
   getLatestScoutSnapshot,
@@ -11,7 +15,11 @@ import {
   triggerPipelineRunNow,
   triggerScoutScanNow
 } from "./services/scheduler.service";
-import { getDemoPortfolioSummary } from "./services/demoPortfolio.service";
+import {
+  closeDemoTradeManually,
+  getDemoPortfolioSummary,
+  openManualDemoTrade
+} from "./services/demoPortfolio.service";
 import { generatePortfolioPdfBuffer } from "./services/pdfReport.service";
 import { sendTelegramPdfReport } from "./agents/executive.agent";
 import {
@@ -31,10 +39,13 @@ import {
   stopDailyReportScheduler
 } from "./services/dailyReport.service";
 import { isFilteredOutSymbol } from "./agents/scout.agent";
-import { analyzeTokenOnDemand } from "./services/tokenCheck.service";
-import { fetchMexcKlines } from "./services/mexcClient.service";
+import {
+  analyzeTokenOnDemand,
+  normalizeMexcSymbol
+} from "./services/tokenCheck.service";
 import { generate15mChartPng } from "./services/chartGenerator.service";
 import { buildTradingViewMexcUrl } from "./utils/exchangeLinks";
+import { getFiveAgentsLiveStatus } from "./services/agentTelemetry.service";
 
 const app = express();
 app.use(express.json());
@@ -89,6 +100,10 @@ app.get("/api/metrics", (_req, res) => {
     telegramBotRunning: isTelegramBotRunning(),
     timestamp: new Date().toISOString()
   });
+});
+
+app.get("/api/agents/status", (_req, res) => {
+  res.status(200).json(getFiveAgentsLiveStatus());
 });
 
 app.get("/api/backtest", async (req, res) => {
@@ -207,6 +222,69 @@ app.get("/api/portfolio", (_req, res) => {
   res.status(200).json(getDemoPortfolioSummary());
 });
 
+app.post("/api/portfolio/buy", async (req, res) => {
+  try {
+    const rawSymbol = String(req.body?.symbol || "").trim();
+    if (!rawSymbol) {
+      res.status(400).json({ ok: false, error: "symbol talab qilinadi" });
+      return;
+    }
+    const rawAmount = req.body?.amountUsd;
+    const amountUsd = rawAmount !== undefined && rawAmount !== null ? Number(rawAmount) : undefined;
+
+    const analysis = await analyzeTokenOnDemand(rawSymbol);
+    const result = openManualDemoTrade(analysis.record, amountUsd);
+    if (!result.ok) {
+      res.status(400).json({
+        ok: false,
+        error: result.error,
+        portfolio: getDemoPortfolioSummary()
+      });
+      return;
+    }
+
+    res.status(200).json({
+      ok: true,
+      trade: result.trade,
+      portfolio: getDemoPortfolioSummary()
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Manual demo buy error";
+    res.status(400).json({ ok: false, error: message, portfolio: getDemoPortfolioSummary() });
+  }
+});
+
+app.post("/api/portfolio/close", async (req, res) => {
+  try {
+    const rawSymbol = String(req.body?.symbol || "").trim();
+    if (!rawSymbol) {
+      res.status(400).json({ ok: false, error: "symbol talab qilinadi" });
+      return;
+    }
+    const symbol = normalizeMexcSymbol(rawSymbol);
+    const livePrice = await fetchMexcTickerPrice(symbol);
+    const result = closeDemoTradeManually(symbol, livePrice);
+
+    if (!result.ok) {
+      res.status(400).json({
+        ok: false,
+        error: result.error,
+        portfolio: getDemoPortfolioSummary()
+      });
+      return;
+    }
+
+    res.status(200).json({
+      ok: true,
+      trade: result.trade,
+      portfolio: getDemoPortfolioSummary()
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Manual demo close error";
+    res.status(400).json({ ok: false, error: message, portfolio: getDemoPortfolioSummary() });
+  }
+});
+
 app.get("/api/reports/pdf", async (_req, res) => {
   try {
     const summary = getDemoPortfolioSummary();
@@ -240,7 +318,7 @@ app.post("/api/reports/pdf/telegram", async (_req, res) => {
 
 if (require.main === module) {
   const server = app.listen(env.PORT, () => {
-    console.log(`[CryptoQuant-Copilot] Stage 5 (100% Production) server running on port ${env.PORT}`);
+    console.log(`[CryptoQuant-Copilot] Stage 5.5 (Mini App + 5-Agent Live Panel) server running on port ${env.PORT}`);
     startScoutScheduler(60_000);
     startDailyReportScheduler();
     startTelegramBot();

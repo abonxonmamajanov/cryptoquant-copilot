@@ -1,6 +1,10 @@
 import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { env } from "../config/env";
-import { getDemoPortfolioSummary } from "./demoPortfolio.service";
+import {
+  closeDemoTradeManually,
+  getDemoPortfolioSummary,
+  openManualDemoTrade
+} from "./demoPortfolio.service";
 import { getLatestPipelineSnapshot } from "./pipeline.service";
 import { generatePortfolioPdfBuffer } from "./pdfReport.service";
 import { triggerPipelineRunNow } from "./scheduler.service";
@@ -27,6 +31,11 @@ import {
 let botInstance: Bot | null = null;
 let botRunning = false;
 
+function getPublicAppUrl(): string {
+  const raw = (process.env.PUBLIC_APP_URL || env.PUBLIC_APP_URL || "https://cryptoquant-copilot.onrender.com").trim();
+  return raw || "https://cryptoquant-copilot.onrender.com";
+}
+
 function isRealToken(val: string): boolean {
   const s = (val || "").trim().toLowerCase();
   return s.length > 20 && s.includes(":") && s !== "pending" && s !== "none";
@@ -34,15 +43,18 @@ function isRealToken(val: string): boolean {
 
 function buildMainMenu(): InlineKeyboard {
   return new InlineKeyboard()
+    .webApp("🖥️ Dashboard (Mini App)", getPublicAppUrl())
+    .row()
     .text("📊 Jonli Statistika", "menu_stats")
+    .text("📂 Ochiq savdolarim", "menu_positions")
+    .row()
     .text("🔍 Oxirgi Signallar", "menu_signals")
-    .row()
     .text("🔀 Rejim (/mode)", "menu_mode")
+    .row()
     .text("📄 PDF Hisobot", "menu_pdf")
-    .row()
     .text("💎 Tariflar (Free/Pro/VIP)", "menu_plans")
-    .text("⚙️ Risk Profili", "menu_risk")
     .row()
+    .text("⚙️ Risk Profili", "menu_risk")
     .text("⚠️ Ogohlantirish", "menu_disclaimer");
 }
 
@@ -98,7 +110,10 @@ function formatLatestSignalsText(): string {
 function formatPlansText(currentTier: string): string {
   const lines = [`💎 *Obuna Tariflari* (Joriy tarifingiz: *${currentTier}*)`, ``];
   for (const p of SUBSCRIPTION_PLANS) {
-    const price = p.priceStars === 0 ? "Bepul ($0)" : `${p.priceStars} Telegram Stars (~$${p.priceUsdApprox}/${p.billingCycleUz})`;
+    const price =
+      p.priceStars === 0
+        ? "Bepul ($0)"
+        : `${p.priceStars} Telegram Stars (~$${p.priceUsdApprox}/${p.billingCycleUz})`;
     lines.push(`*${p.titleUz}* — ${price}`);
     for (const f of p.featuresUz) {
       lines.push(`  • ${f}`);
@@ -107,6 +122,60 @@ function formatPlansText(currentTier: string): string {
   }
   lines.push(`_To'lov va VIP ulanish tez orada Telegram Stars orqali avtomatik yoqiladi._`);
   return lines.join("\n");
+}
+
+async function buildOpenPositionsPayload(): Promise<{
+  text: string;
+  keyboard: InlineKeyboard;
+}> {
+  const summary = getDemoPortfolioSummary();
+  if (summary.openTrades.length === 0) {
+    return {
+      text: "📂 *Ochiq demo pozitsiyalar yo'q.*\n\nIstalgan koinni `/buy SOL` orqali yoki signal ostidagi `🛒 Demoda sotib olish ($100)` tugmasi bilan ochishingiz mumkin.",
+      keyboard: buildMainMenu()
+    };
+  }
+
+  const livePrices = await Promise.all(
+    summary.openTrades.map(async (t) => {
+      try {
+        return await fetchMexcTickerPrice(t.symbol);
+      } catch {
+        return t.entryPrice;
+      }
+    })
+  );
+
+  const lines = [
+    `📂 *Ochiq Demo Savdolarim (${summary.openTrades.length} ta)*`,
+    `💰 *Demo Balans:* $${summary.currentBalanceUsd.toFixed(2)}`,
+    ``
+  ];
+
+  const kb = new InlineKeyboard();
+
+  summary.openTrades.forEach((t, idx) => {
+    const live = livePrices[idx] ?? t.entryPrice;
+    const pnlPct = Number((((live - t.entryPrice) / t.entryPrice) * 100).toFixed(2));
+    const pnlUsd = Number(((t.positionSizeUsd * pnlPct) / 100).toFixed(2));
+    const sign = pnlUsd >= 0 ? "+" : "";
+    const pnlIcon = pnlUsd >= 0 ? "🟢" : "🔴";
+    const beTag = t.breakevenActive ? " | 🛡️ BE faol" : "";
+    const srcTag = t.source === "MANUAL" ? "Qo'lda" : "Avto";
+
+    lines.push(
+      `${pnlIcon} *${t.symbol}* (${t.tradeMode} • ${srcTag}${beTag})`,
+      `  • Entry: \`${t.entryPrice}\` → Jonli: \`${live}\` | *${sign}${pnlPct}% (${sign}$${pnlUsd})*`,
+      `  • TP1: \`${t.tp1Price}\` | TP2: \`${t.tp2Price}\` | SL: \`${t.stopLossPrice}\` | Hajm: $${t.positionSizeUsd}`,
+      ``
+    );
+
+    kb.text(`🔴 Yopish: ${t.symbol}`, `demo_close:${t.symbol}`).row();
+  });
+
+  kb.webApp("🖥️ Dashboard (Mini App)", getPublicAppUrl());
+
+  return { text: lines.join("\n"), keyboard: kb };
 }
 
 export function isTelegramBotRunning(): boolean {
@@ -124,7 +193,7 @@ export function startTelegramBot(): void {
 
     const handleTokenCheck = async (
       ctx: {
-        reply: Bot["api"]["sendMessage"] extends never ? never : (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+        reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
         replyWithPhoto: (photo: InputFile, other?: Record<string, unknown>) => Promise<unknown>;
       },
       rawSymbol: string
@@ -148,13 +217,79 @@ export function startTelegramBot(): void {
       }
     };
 
+    const handleManualBuy = async (
+      ctx: {
+        reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+      },
+      rawSymbol: string,
+      amountUsd?: number
+    ) => {
+      try {
+        const analysis = await analyzeTokenOnDemand(rawSymbol);
+        const res = openManualDemoTrade(analysis.record, amountUsd);
+        if (!res.ok || !res.trade) {
+          await ctx.reply(`⚠️ Sotib olib bo'lmadi: ${res.error || "Xatolik"}`, {
+            parse_mode: "Markdown"
+          });
+          return;
+        }
+        const t = res.trade;
+        const summary = getDemoPortfolioSummary();
+        const kb = new InlineKeyboard()
+          .text("📂 Ochiq savdolarim", "menu_positions")
+          .text(`🔴 Yopish: ${t.symbol}`, `demo_close:${t.symbol}`)
+          .row()
+          .webApp("🖥️ Dashboard (Mini App)", getPublicAppUrl());
+
+        await ctx.reply(
+          [
+            `✅ *DEMO POZITSIYA OCHILDI (QO'LDA)*`,
+            ``,
+            `🪙 *Juftlik:* \`${t.symbol}\` (${t.tradeMode})`,
+            `💵 *Tikilgan hajm:* $${t.positionSizeUsd} | *Joriy balans:* $${summary.currentBalanceUsd.toFixed(2)}`,
+            `🎯 *Kirish (Entry):* \`${t.entryPrice}\``,
+            `✅ *TP1 (Breakeven):* \`${t.tp1Price}\``,
+            `✅ *TP2 (Asosiy):* \`${t.tp2Price}\``,
+            `🚀 *TP3 (Max):* \`${t.tp3Price}\``,
+            `🛑 *Stop-Loss (SL):* \`${t.stopLossPrice}\``,
+            ``,
+            `_TP1/TP2/SL har 60 soniyada avtomatik kuzatiladi._`
+          ].join("\n"),
+          { parse_mode: "Markdown", reply_markup: kb }
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Demo xarid xatosi";
+        await ctx.reply(`❌ *${rawSymbol.toUpperCase()}* demo xaridida xatolik: ${msg}`, {
+          parse_mode: "Markdown"
+        });
+      }
+    };
+
     bot.command("start", async (ctx) => {
       const uid = String(ctx.from?.id ?? "unknown");
       const user = upsertSubscriber(uid, ctx.from?.username ?? null, ctx.from?.first_name ?? null);
       await ctx.reply(
-        `Assalomu alaykum, *${user.firstName || "Treyder"}*! 👋\n\n*CryptoQuant-Copilot* — 5 ta mustaqil agentdan iborat MEXC Spot kripto-signal tizimiga xush kelibsiz.\n\n📌 Tarifingiz: *${user.tier}* | Risk: *${user.riskProfile}* | Rejim: *${getActiveSignalMode()}*\n🔎 Istalgan koinni tekshirish uchun \`SOL\`, \`BTC\` yoki \`/check HYPE\` yozing.`,
+        `Assalomu alaykum, *${user.firstName || "Treyder"}*! 👋\n\n*CryptoQuant-Copilot* — 5 ta mustaqil agentdan iborat MEXC Spot kripto-signal tizimiga xush kelibsiz.\n\n📌 Tarif: *${user.tier}* | Risk: *${user.riskProfile}* | Rejim: *${getActiveSignalMode()}*\n🔎 Koin tekshirish: \`SOL\`, \`BTC\` yoki \`/check HYPE\`\n🛒 Demo xarid: \`/buy SOL 100\` | 📂 Ochiq savdolar: \`/positions\``,
         { parse_mode: "Markdown", reply_markup: buildMainMenu() }
       );
+    });
+
+    bot.command("buy", async (ctx) => {
+      const parts = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
+      if (parts.length === 0) {
+        await ctx.reply("🛒 Foydalanish: `/buy SOL` yoki `/buy SOL 200`", {
+          parse_mode: "Markdown"
+        });
+        return;
+      }
+      const rawSym = parts[0];
+      const amount = parts[1] ? Number(parts[1]) : undefined;
+      await handleManualBuy(ctx, rawSym, amount);
+    });
+
+    bot.command("positions", async (ctx) => {
+      const { text, keyboard } = await buildOpenPositionsPayload();
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: keyboard });
     });
 
     bot.command("mode", async (ctx) => {
@@ -252,6 +387,56 @@ export function startTelegramBot(): void {
       });
     });
 
+    // Positions & Manual Demo Buy/Close callbacks
+    bot.callbackQuery("menu_positions", async (ctx) => {
+      await ctx.answerCallbackQuery("Ochiq savdolar yuklanmoqda...");
+      const { text, keyboard } = await buildOpenPositionsPayload();
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: keyboard });
+    });
+
+    bot.callbackQuery(/^demo_buy:([A-Z0-9]+):([0-9.]+)$/, async (ctx) => {
+      const symbol = ctx.match[1];
+      const amount = Number(ctx.match[2]) || 100;
+      await ctx.answerCallbackQuery(`${symbol} demoda sotib olinmoqda...`);
+      await handleManualBuy(ctx, symbol, amount);
+    });
+
+    bot.callbackQuery(/^demo_close:([A-Z0-9]+)$/, async (ctx) => {
+      const symbol = ctx.match[1];
+      await ctx.answerCallbackQuery(`${symbol} yopilmoqda...`);
+      try {
+        const livePrice = await fetchMexcTickerPrice(symbol);
+        const res = closeDemoTradeManually(symbol, livePrice);
+        if (!res.ok || !res.trade) {
+          await ctx.reply(`⚠️ Yopib bo'lmadi: ${res.error || "Ochiq pozitsiya topilmadi"}`);
+          return;
+        }
+        const t = res.trade;
+        const summary = getDemoPortfolioSummary();
+        const pnlUsd = t.pnlUsd ?? 0;
+        const pnlPct = t.pnlPercent ?? 0;
+        const sign = pnlUsd >= 0 ? "+" : "";
+        const icon = pnlUsd >= 0 ? "🟢" : "🔴";
+
+        await ctx.reply(
+          [
+            `${icon} *DEMO POZITSIYA QO'LDA YOPILDI*`,
+            ``,
+            `🪙 *Juftlik:* \`${t.symbol}\``,
+            `🎯 *Entry:* \`${t.entryPrice}\` → *Exit:* \`${t.exitPrice}\``,
+            `💰 *Realizatsiya PnL:* *${sign}${pnlPct}% (${sign}$${pnlUsd})*`,
+            `🏦 *Yangilangan Demo Balans:* $${summary.currentBalanceUsd.toFixed(2)}`
+          ].join("\n"),
+          { parse_mode: "Markdown", reply_markup: buildMainMenu() }
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Yopish xatosi";
+        await ctx.reply(`❌ \`${symbol}\` pozitsiyasini yopishda xatolik: ${msg}`, {
+          parse_mode: "Markdown"
+        });
+      }
+    });
+
     // Mode switcher callbacks
     bot.callbackQuery("menu_mode", async (ctx) => {
       await ctx.answerCallbackQuery();
@@ -296,7 +481,7 @@ export function startTelegramBot(): void {
         );
         await ctx.reply(
           [
-            `🔄 *Jonli Narx Yangilandi — \`${symbol}\`*`,
+            `🔄 *Jonli Narx Yangilandi — ${symbol}*`,
             ``,
             `💵 *Joriy narx:* \`${livePrice}\``,
             `🎯 *Signal Entry:* \`${entry}\` (${sign}${diffPct}%)`,
@@ -363,7 +548,7 @@ export function startTelegramBot(): void {
         );
         await ctx.reply(
           [
-            `🧪 *Tarixiy Backtest — \`${bt.symbol}\` (15M)*`,
+            `🧪 *Tarixiy Backtest — ${bt.symbol} (15M)*`,
             ``,
             `🕯️ *Tahlil qilingan shamlar:* ${bt.candlesAnalyzed} ta`,
             `📊 *Jami savdolar:* ${bt.totalTrades} ta (✅ ${bt.wins} foyda / 🛑 ${bt.losses} zarar)`,

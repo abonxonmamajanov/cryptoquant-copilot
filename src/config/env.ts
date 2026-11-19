@@ -14,7 +14,8 @@ const envSchema = z.object({
   BINANCE_API_KEY: z.string().optional().default(""),
   BINANCE_API_SECRET: z.string().optional().default(""),
   COINGECKO_API_KEY: z.string().optional().default(""),
-  GEMINI_API_KEY: z.string().optional().default("")
+  GEMINI_API_KEY: z.string().optional().default(""),
+  PUBLIC_APP_URL: z.string().optional().default("https://cryptoquant-copilot.onrender.com")
 });
 
 export const env = envSchema.parse(process.env);
