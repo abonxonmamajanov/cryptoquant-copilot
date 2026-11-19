@@ -102,10 +102,13 @@ export async function runTechnicianAgent(
   const tradeMode: TradeMode =
     modeHint ?? (ema9 > ema21 * 1.003 && rsi14 >= 45 && rsi14 <= 66 && atrPct >= 0.4 ? "SWING" : "INTRADAY");
 
+  const roundedEntry = roundPrice(entryPrice);
+  const mult1 = tradeMode === "SWING" ? 1.6 : 1.3;
+  const mult2 = tradeMode === "SWING" ? 2.8 : 2.2;
+  const mult3 = tradeMode === "SWING" ? 4.2 : 3.2;
+
   let stopLossPrice: number;
-  let tp1Price: number;
-  let tp2Price: number;
-  let tp3Price: number;
+  let riskPerUnit: number;
 
   if (tradeMode === "SWING") {
     const swingAtrStop = entryPrice - Math.max(atr14 * 2.0, entryPrice * 0.02);
@@ -113,26 +116,38 @@ export async function runTechnicianAgent(
     const supportStop = supportLevel * 0.994;
     const rawStop = Math.max(maxSwingFloor, Math.min(swingAtrStop, supportStop));
     stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.985));
-
-    const riskPerUnit = Math.max(entryPrice - stopLossPrice, entryPrice * 0.008);
-    tp1Price = roundPrice(entryPrice + riskPerUnit * 1.6);
-    tp2Price = roundPrice(Math.max(entryPrice + riskPerUnit * 2.8, resistanceLevel * 1.015));
-    tp3Price = roundPrice(entryPrice + riskPerUnit * 4.2);
+    riskPerUnit = Math.max(roundedEntry - stopLossPrice, roundedEntry * 0.008);
   } else {
     const atrStop = entryPrice - Math.max(atr14 * 1.5, entryPrice * 0.012);
     const supportStop = supportLevel * 0.996;
     const rawStop = Math.max(atrStop, supportStop);
     stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.988));
-
-    const riskPerUnit = Math.max(entryPrice - stopLossPrice, entryPrice * 0.005);
-    tp1Price = roundPrice(entryPrice + riskPerUnit * 1.3);
-    tp2Price = roundPrice(Math.max(entryPrice + riskPerUnit * 2.2, resistanceLevel * 1.01));
-    tp3Price = roundPrice(entryPrice + riskPerUnit * 3.2);
+    riskPerUnit = Math.max(roundedEntry - stopLossPrice, roundedEntry * 0.005);
   }
 
+  const tp1Price = roundPrice(roundedEntry + riskPerUnit * mult1);
+  const tp2Price = roundPrice(
+    Math.max(roundedEntry + riskPerUnit * mult2, resistanceLevel * 1.01, tp1Price * 1.005)
+  );
+  const tp3Price = roundPrice(
+    Math.max(roundedEntry + riskPerUnit * mult3, tp2Price + riskPerUnit * 1.0, tp2Price * 1.008)
+  );
   const takeProfitPrice = tp2Price;
-  const riskPerUnit = Math.max(entryPrice - stopLossPrice, entryPrice * 0.005);
-  const riskRewardRatio = Number(((takeProfitPrice - entryPrice) / riskPerUnit).toFixed(2));
+
+  if (
+    !(
+      stopLossPrice < roundedEntry &&
+      roundedEntry < tp1Price &&
+      tp1Price < tp2Price &&
+      tp2Price < tp3Price
+    )
+  ) {
+    throw new Error(
+      `Invalid TP/SL ordering for ${candidate.symbol}: SL=${stopLossPrice}, Entry=${roundedEntry}, TP1=${tp1Price}, TP2=${tp2Price}, TP3=${tp3Price}`
+    );
+  }
+
+  const riskRewardRatio = Number(((takeProfitPrice - roundedEntry) / riskPerUnit).toFixed(2));
 
   // Score (0-100)
   let techScore = 40;
@@ -155,7 +170,7 @@ export async function runTechnicianAgent(
     symbol: candidate.symbol,
     direction,
     tradeMode,
-    entryPrice: roundPrice(entryPrice),
+    entryPrice: roundedEntry,
     stopLossPrice,
     takeProfitPrice,
     tp1Price,

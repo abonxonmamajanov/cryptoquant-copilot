@@ -336,9 +336,9 @@ export function startTelegramBot(): void {
         );
         await ctx.replyWithPhoto(new InputFile(png1h, `${symbol}-1h.png`), {
           caption: [
-            `📊 *\`${symbol}\` — 1H Grafik (MEXC Spot)*`,
-            `🎯 Entry: \`${tech.entryPrice}\` | ✅ TP1: \`${tech.tp1Price ?? tech.takeProfitPrice}\` | TP2: \`${tech.takeProfitPrice}\` | 🛑 SL: \`${tech.stopLossPrice}\``,
-            `⚖️ R:R: 1:${tech.riskRewardRatio} | Qaror: *${critic.verdict}* (${critic.confidenceScore}/100)`
+            `📊 *${symbol} — 1H Grafik (MEXC Spot)*`,
+            `🎯 Entry: \`${tech.entryPrice}\` | ✅ TP1: \`${tech.tp1Price ?? tech.takeProfitPrice}\` | TP2: \`${tech.takeProfitPrice}\` | 🚀 TP3: \`${tech.tp3Price ?? tech.takeProfitPrice}\` | 🛑 SL: \`${tech.stopLossPrice}\``,
+            `⚖️ R:R: 1:${tech.riskRewardRatio} | Joriy jonli holat: *${critic.verdict}* (${critic.confidenceScore}/100)`
           ].join("\n"),
           parse_mode: "Markdown",
           reply_markup: kb

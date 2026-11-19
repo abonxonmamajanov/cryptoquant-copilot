@@ -23,11 +23,24 @@ async function main() {
   // 2. Test TP1 Breakeven + SL Post-Mortem + Intraday/Swing breakdown
   resetDemoPortfolioForTest();
   const btcCheck = await analyzeTokenOnDemand("BTC");
-  if (!btcCheck.record.technician.tp1Price || !btcCheck.record.technician.tp3Price) {
+  const tech = btcCheck.record.technician;
+  if (!tech.tp1Price || !tech.tp2Price || !tech.tp3Price) {
     throw new Error("Missing TP1/TP2/TP3 levels on Technician result");
   }
+  if (
+    !(
+      tech.stopLossPrice < tech.entryPrice &&
+      tech.entryPrice < tech.tp1Price &&
+      tech.tp1Price < tech.tp2Price &&
+      tech.tp2Price < tech.tp3Price
+    )
+  ) {
+    throw new Error(
+      `Non-monotonic SL/Entry/TP1/TP2/TP3 ordering: SL=${tech.stopLossPrice}, Entry=${tech.entryPrice}, TP1=${tech.tp1Price}, TP2=${tech.tp2Price}, TP3=${tech.tp3Price}`
+    );
+  }
   console.log(
-    `[PASS] Hybrid BTC check -> Mode: ${btcCheck.record.criticRisk.tradeMode} | TP1=${btcCheck.record.technician.tp1Price} | TP2=${btcCheck.record.technician.tp2Price} | TP3=${btcCheck.record.technician.tp3Price}`
+    `[PASS] Hybrid BTC check -> Mode: ${btcCheck.record.criticRisk.tradeMode} | SL=${tech.stopLossPrice} < Entry=${tech.entryPrice} < TP1=${tech.tp1Price} < TP2=${tech.tp2Price} < TP3=${tech.tp3Price}`
   );
 
   // Simulate TP1 hit -> Breakeven SL move
