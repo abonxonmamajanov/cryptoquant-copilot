@@ -5,12 +5,16 @@ import { TechnicalAnalysisResult } from "./technician.agent";
 import { MacroFlowResult } from "./macroFlow.agent";
 import { CriticRiskResult } from "./criticRisk.agent";
 import type { DemoTradeItem } from "../services/demoPortfolio.service";
+import { buildTelegramSignalReplyMarkup } from "../utils/exchangeLinks";
+import { fetchMexcKlines } from "../services/mexcClient.service";
+import { generate15mChartPng } from "../services/chartGenerator.service";
 
 export interface ExecutiveDispatchResult {
   symbol: string;
   mode: "LIVE_TELEGRAM" | "DRY_RUN";
   sent: boolean;
   telegramMessage: string;
+  chartAttached?: boolean;
   error?: string;
 }
 
@@ -20,12 +24,26 @@ export interface TelegramSendResult {
   error?: string;
 }
 
+function roundPrice(price: number): number {
+  if (price >= 100) return Number(price.toFixed(2));
+  if (price >= 1) return Number(price.toFixed(4));
+  if (price >= 0.01) return Number(price.toFixed(5));
+  return Number(price.toFixed(7));
+}
+
+export function formatEntryZoneRange(entryPrice: number): string {
+  const low = roundPrice(entryPrice * 0.997);
+  const high = roundPrice(entryPrice * 1.003);
+  return `${low} – ${high}`;
+}
+
 export function formatTelegramSignalCard(
   scout: ScoutCandidate,
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
   critic: CriticRiskResult
 ): string {
+  const entryZone = formatEntryZoneRange(tech.entryPrice);
   return [
     `🚀 *CRYPTOQUANT-COPILOT SIGNAL*`,
     ``,
@@ -33,6 +51,7 @@ export function formatTelegramSignalCard(
     `📊 *Yo'nalish:* LONG | *Ishonch:* ${critic.confidenceScore}/100`,
     ``,
     `🎯 *Kirish (Entry):* \`${tech.entryPrice}\``,
+    `📍 *Kirish zonasi (Entry Zone):* \`${entryZone}\``,
     `✅ *Take-Profit (TP):* \`${tech.takeProfitPrice}\``,
     `🛑 *Stop-Loss (SL):* \`${tech.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${tech.riskRewardRatio}`,
@@ -83,7 +102,10 @@ function hasTelegramCredentials(): boolean {
   );
 }
 
-export async function sendTelegramTextMessage(text: string): Promise<TelegramSendResult> {
+export async function sendTelegramTextMessage(
+  text: string,
+  replyMarkup?: Record<string, unknown>
+): Promise<TelegramSendResult> {
   if (!hasTelegramCredentials()) {
     return {
       mode: "DRY_RUN",
@@ -97,7 +119,8 @@ export async function sendTelegramTextMessage(text: string): Promise<TelegramSen
       {
         chat_id: env.TELEGRAM_CHANNEL_ID,
         text,
-        parse_mode: "Markdown"
+        parse_mode: "Markdown",
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
       },
       { timeout: 10000 }
     );
@@ -174,13 +197,77 @@ export async function runExecutiveAgent(
   critic: CriticRiskResult
 ): Promise<ExecutiveDispatchResult> {
   const telegramMessage = formatTelegramSignalCard(scout, tech, macro, critic);
-  const res = await sendTelegramTextMessage(telegramMessage);
+  const replyMarkup = buildTelegramSignalReplyMarkup(scout.symbol, tech.entryPrice);
+
+  let chartPng: Buffer | null = null;
+  try {
+    const klines = await fetchMexcKlines(scout.symbol, "15m", 60);
+    chartPng = generate15mChartPng(klines, {
+      symbol: scout.symbol,
+      entryPrice: tech.entryPrice,
+      takeProfitPrice: tech.takeProfitPrice,
+      stopLossPrice: tech.stopLossPrice,
+      verdict: critic.verdict,
+      timeframeLabel: "15M"
+    });
+  } catch {
+    chartPng = null;
+  }
+
+  if (!hasTelegramCredentials()) {
+    return {
+      symbol: scout.symbol,
+      mode: "DRY_RUN",
+      sent: false,
+      telegramMessage,
+      chartAttached: Boolean(chartPng)
+    };
+  }
+
+  if (chartPng) {
+    try {
+      const form = new FormData();
+      form.append("chat_id", env.TELEGRAM_CHANNEL_ID);
+      form.append("caption", telegramMessage);
+      form.append("parse_mode", "Markdown");
+      form.append("reply_markup", JSON.stringify(replyMarkup));
+      form.append(
+        "photo",
+        new Blob([new Uint8Array(chartPng)], { type: "image/png" }),
+        `${scout.symbol}-15m.png`
+      );
+
+      const response = await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,
+        {
+          method: "POST",
+          body: form,
+          signal: AbortSignal.timeout(15000)
+        }
+      );
+
+      if (response.ok) {
+        return {
+          symbol: scout.symbol,
+          mode: "LIVE_TELEGRAM",
+          sent: true,
+          telegramMessage,
+          chartAttached: true
+        };
+      }
+    } catch {
+      // Fall back to text sendMessage with reply_markup below
+    }
+  }
+
+  const res = await sendTelegramTextMessage(telegramMessage, replyMarkup);
 
   return {
     symbol: scout.symbol,
     mode: res.mode,
     sent: res.sent,
     telegramMessage,
+    chartAttached: false,
     ...(res.error ? { error: res.error } : {})
   };
 }

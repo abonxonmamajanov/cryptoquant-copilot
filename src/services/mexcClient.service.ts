@@ -1,4 +1,5 @@
 import axios, { AxiosError } from "axios";
+import { resilientHttpsAgent } from "./marketHealth.service";
 
 const MEXC_MIRRORS = [
   "https://api.mexc.com",
@@ -49,6 +50,7 @@ async function fetchWithMirrorFallback<T>(path: string, timeoutMs = 10000): Prom
     try {
       const response = await axios.get<T>(url, {
         timeout: timeoutMs,
+        httpsAgent: resilientHttpsAgent,
         headers: {
           Accept: "application/json",
           "User-Agent": "CryptoQuant-Copilot/0.3"
@@ -86,13 +88,47 @@ export async function fetchMexcTickers24h(): Promise<MexcTicker24h[]> {
     .filter((t) => t.symbol.length > 0 && Number.isFinite(t.lastPrice) && t.lastPrice > 0);
 }
 
+export async function fetchMexcTicker24h(symbol: string): Promise<MexcTicker24h> {
+  const item = await fetchWithMirrorFallback<Record<string, string>>(
+    `/api/v3/ticker/24hr?symbol=${encodeURIComponent(symbol.toUpperCase().trim())}`,
+    10000
+  );
+  const lastPrice = Number(item.lastPrice || 0);
+  if (!item.symbol || !Number.isFinite(lastPrice) || lastPrice <= 0) {
+    throw new Error(`Ticker not found on MEXC Spot: ${symbol}`);
+  }
+  const rawPct = Number(item.priceChangePercent || 0);
+  return {
+    symbol: String(item.symbol),
+    lastPrice,
+    priceChangePercent: rawPct * (Math.abs(rawPct) < 1 ? 100 : 1),
+    quoteVolume: Number(item.quoteVolume || 0),
+    volume: Number(item.volume || 0),
+    highPrice: Number(item.highPrice || 0),
+    lowPrice: Number(item.lowPrice || 0)
+  };
+}
+
+export async function fetchMexcTickerPrice(symbol: string): Promise<number> {
+  const data = await fetchWithMirrorFallback<{ symbol: string; price: string }>(
+    `/api/v3/ticker/price?symbol=${encodeURIComponent(symbol.toUpperCase().trim())}`,
+    8000
+  );
+  const price = Number(data.price || 0);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`Invalid live price for ${symbol}`);
+  }
+  return price;
+}
+
 export async function fetchMexcKlines(
   symbol: string,
-  interval: "15m" | "1h" = "15m",
+  interval: "15m" | "1h" | "60m" = "15m",
   limit = 60
 ): Promise<MexcKline[]> {
+  const mexcInterval = interval === "1h" ? "60m" : interval;
   const raw = await fetchWithMirrorFallback<Array<Array<string | number>>>(
-    `/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`,
+    `/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${mexcInterval}&limit=${limit}`,
     10000
   );
 

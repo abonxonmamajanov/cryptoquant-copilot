@@ -103,6 +103,32 @@ export function renderDashboardHtml(): string {
       </div>
     </section>
 
+    <!-- On-Demand Token Search & 15M Chart -->
+    <section class="glass-card rounded-2xl p-5">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="text-base font-semibold text-white">🔎 Koin Tekshirish (15M Grafik + 5-Agent Tahlil)</h2>
+          <p class="text-xs text-slate-400">Istalgan MEXC Spot juftligini kiriting (masalan: BTC, SOL, HYPE, SUI)</p>
+        </div>
+        <form id="tokenSearchForm" class="flex w-full gap-2 sm:w-auto">
+          <input
+            id="tokenSearchInput"
+            type="text"
+            placeholder="SOL, BTC, HYPE..."
+            class="w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3.5 py-2 text-sm uppercase text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none sm:w-52"
+          />
+          <button
+            id="tokenSearchBtn"
+            type="submit"
+            class="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:opacity-60"
+          >
+            Tekshirish
+          </button>
+        </form>
+      </div>
+      <div id="tokenSearchResult" class="mt-4 hidden"></div>
+    </section>
+
     <!-- Live 5-Agent Pipeline Table -->
     <section class="glass-card overflow-hidden rounded-2xl">
       <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-5 py-4">
@@ -350,6 +376,109 @@ export function renderDashboardHtml(): string {
           </div>\`;
       }).join("");
     }
+
+    async function runDashboardBacktest(symbol) {
+      const box = document.getElementById("tokenBacktestBox");
+      if (!box) return;
+      box.classList.remove("hidden");
+      box.innerHTML = '<div class="text-xs text-slate-400">🧪 Tarixiy backtest hisoblanmoqda (240 x 15M sham)...</div>';
+      try {
+        const res = await fetch("/api/backtest?symbol=" + encodeURIComponent(symbol) + "&limit=240");
+        const bt = await res.json();
+        if (!res.ok) throw new Error(bt.error || "Backtest xatosi");
+        const sign = bt.netPnlPct >= 0 ? "+" : "";
+        box.innerHTML = \`
+          <div class="grid grid-cols-2 gap-3 text-xs sm:grid-cols-5">
+            <div><span class="text-slate-400">Shamlar:</span> <span class="font-semibold text-white">\${escapeHtml(bt.candlesAnalyzed)}</span></div>
+            <div><span class="text-slate-400">Savdolar:</span> <span class="font-semibold text-white">\${escapeHtml(bt.totalTrades)} (\${escapeHtml(bt.wins)}W / \${escapeHtml(bt.losses)}L)</span></div>
+            <div><span class="text-slate-400">Win Rate:</span> <span class="font-semibold text-sky-400">\${escapeHtml(bt.winRatePct)}%</span></div>
+            <div><span class="text-slate-400">Sof PnL:</span> <span class="font-semibold \${bt.netPnlPct >= 0 ? "text-emerald-400" : "text-rose-400"}">\${sign}\${escapeHtml(bt.netPnlPct)}%</span></div>
+            <div><span class="text-slate-400">Max DD:</span> <span class="font-semibold text-amber-400">\${escapeHtml(bt.maxDrawdownPct)}%</span></div>
+          </div>\`;
+      } catch (err) {
+        box.innerHTML = '<div class="text-xs text-rose-400">❌ ' + escapeHtml(err.message) + '</div>';
+      }
+    }
+
+    document.getElementById("tokenSearchForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = document.getElementById("tokenSearchInput");
+      const btn = document.getElementById("tokenSearchBtn");
+      const container = document.getElementById("tokenSearchResult");
+      const raw = (input.value || "").trim();
+      if (!raw) return;
+
+      btn.disabled = true;
+      btn.textContent = "Tahlil...";
+      container.classList.remove("hidden");
+      container.innerHTML = '<div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-400">🔍 5-agent va 15M grafik tayyorlanmoqda...</div>';
+
+      try {
+        const res = await fetch("/api/token/" + encodeURIComponent(raw) + "/check");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Tekshiruvda xatolik");
+
+        const r = data.record;
+        const approved = r.criticRisk.verdict === "APPROVE";
+        const badgeClass = approved
+          ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+          : "bg-rose-500/15 text-rose-300 border-rose-500/40";
+        const tvUrl = data.tradingViewUrl || ("https://www.tradingview.com/chart/?symbol=MEXC:" + encodeURIComponent(data.symbol) + "&interval=15");
+        const chartSrc = "/api/token/" + encodeURIComponent(data.symbol) + "/chart.png?interval=15m&t=" + Date.now();
+
+        container.innerHTML = \`
+          <div class="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="flex items-center gap-2.5">
+                <span class="text-lg font-bold text-white">\${escapeHtml(data.symbol)}</span>
+                <span class="rounded-md border px-2.5 py-0.5 text-xs font-bold \${badgeClass}">\${escapeHtml(r.criticRisk.verdict)} (\${escapeHtml(r.criticRisk.confidenceScore)}/100)</span>
+              </div>
+              <div class="flex flex-wrap gap-3 font-mono text-xs">
+                <span>Entry: <strong class="text-sky-300">\${escapeHtml(r.technician.entryPrice)}</strong></span>
+                <span>TP: <strong class="text-emerald-400">\${escapeHtml(r.technician.takeProfitPrice)}</strong></span>
+                <span>SL: <strong class="text-rose-400">\${escapeHtml(r.technician.stopLossPrice)}</strong></span>
+                <span>R:R: <strong class="text-white">1:\${escapeHtml(r.technician.riskRewardRatio)}</strong></span>
+              </div>
+            </div>
+
+            <div class="overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
+              <img src="\${chartSrc}" alt="\${escapeHtml(data.symbol)} 15M Chart" class="w-full h-auto block" />
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <a
+                href="\${tvUrl}"
+                target="_blank"
+                rel="noopener"
+                class="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-xs font-semibold text-slate-950 transition hover:bg-sky-400"
+              >
+                <span>📈</span>
+                <span>TradingView (MEXC 15M)</span>
+              </a>
+              <button
+                id="tokenBacktestBtn"
+                type="button"
+                class="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-100 transition hover:border-indigo-400 hover:bg-slate-700"
+              >
+                <span>🧪</span>
+                <span>Backtest</span>
+              </button>
+              <span class="text-xs text-slate-400">RSI(14): \${escapeHtml(r.technician.rsi14)} | Macro: \${escapeHtml(r.macroFlow.regime)}</span>
+            </div>
+
+            <div id="tokenBacktestBox" class="hidden rounded-lg border border-slate-800 bg-slate-900/70 p-3"></div>
+          </div>\`;
+
+        document.getElementById("tokenBacktestBtn").addEventListener("click", () => {
+          runDashboardBacktest(data.symbol);
+        });
+      } catch (err) {
+        container.innerHTML = '<div class="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-300">❌ ' + escapeHtml(err.message) + '</div>';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Tekshirish";
+      }
+    });
 
     async function refreshAll() {
       try {

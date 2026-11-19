@@ -108,7 +108,7 @@ function resilientLookup(
   });
 }
 
-const resilientHttpsAgent = new https.Agent({
+export const resilientHttpsAgent = new https.Agent({
   keepAlive: false,
   lookup: resilientLookup as unknown as https.AgentOptions["lookup"]
 });

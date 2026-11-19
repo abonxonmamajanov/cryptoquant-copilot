@@ -31,6 +31,10 @@ import {
   stopDailyReportScheduler
 } from "./services/dailyReport.service";
 import { isFilteredOutSymbol } from "./agents/scout.agent";
+import { analyzeTokenOnDemand } from "./services/tokenCheck.service";
+import { fetchMexcKlines } from "./services/mexcClient.service";
+import { generate15mChartPng } from "./services/chartGenerator.service";
+import { buildTradingViewMexcUrl } from "./utils/exchangeLinks";
 
 const app = express();
 app.use(express.json());
@@ -106,6 +110,49 @@ app.get("/api/backtest", async (req, res) => {
     const message = err instanceof Error ? err.message : "Backtest error";
     const status = message.includes("filtered out") || message.includes("Insufficient") ? 400 : 500;
     res.status(status).json({ error: message });
+  }
+});
+
+app.get("/api/token/:symbol/check", async (req, res) => {
+  try {
+    const result = await analyzeTokenOnDemand(req.params.symbol);
+    res.status(200).json({
+      symbol: result.symbol,
+      record: result.record,
+      caption: result.caption,
+      chartUrl: `/api/token/${encodeURIComponent(result.symbol)}/chart.png`,
+      tradingViewUrl: buildTradingViewMexcUrl(result.symbol, "15")
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Token check error";
+    const status = message.includes("tahlil qilinmaydi") || message.includes("not found") ? 400 : 500;
+    res.status(status).json({ error: message });
+  }
+});
+
+app.get("/api/token/:symbol/chart.png", async (req, res) => {
+  try {
+    const intervalParam = String(req.query.interval || "15m").toLowerCase();
+    const is1h = intervalParam === "1h" || intervalParam === "60";
+    const analysis = await analyzeTokenOnDemand(req.params.symbol);
+    let png = analysis.chartPng;
+    if (is1h) {
+      const klines1h = await fetchMexcKlines(analysis.symbol, "1h", 60);
+      png = generate15mChartPng(klines1h, {
+        symbol: analysis.symbol,
+        entryPrice: analysis.record.technician.entryPrice,
+        takeProfitPrice: analysis.record.technician.takeProfitPrice,
+        stopLossPrice: analysis.record.technician.stopLossPrice,
+        verdict: analysis.record.criticRisk.verdict,
+        timeframeLabel: "1H"
+      });
+    }
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).send(png);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Chart generation error";
+    res.status(400).json({ error: message });
   }
 });
 
