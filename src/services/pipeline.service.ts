@@ -39,6 +39,11 @@ export interface PipelineRunSnapshot {
 }
 
 const MAX_SYMBOLS_TO_EVALUATE = 5;
+let latestPipelineSnapshot: PipelineRunSnapshot | null = null;
+
+export function getLatestPipelineSnapshot(): PipelineRunSnapshot | null {
+  return latestPipelineSnapshot;
+}
 
 export async function runFiveAgentPipeline(): Promise<{
   scoutSnapshot: ScoutScanSnapshot;
@@ -99,18 +104,21 @@ export async function runFiveAgentPipeline(): Promise<{
   const approvedCount = records.filter((r) => r.criticRisk.verdict === "APPROVE").length;
   const rejectedCount = records.length - approvedCount;
 
+  const pipelineSnapshot: PipelineRunSnapshot = {
+    runAt: new Date().toISOString(),
+    durationMs: Date.now() - started,
+    scoutSummary,
+    evaluatedCount: records.length,
+    approvedCount,
+    rejectedCount,
+    closedTradesThisRun,
+    portfolioSummary: getDemoPortfolioSummary(),
+    records
+  };
+  latestPipelineSnapshot = pipelineSnapshot;
+
   return {
     scoutSnapshot,
-    pipelineSnapshot: {
-      runAt: new Date().toISOString(),
-      durationMs: Date.now() - started,
-      scoutSummary,
-      evaluatedCount: records.length,
-      approvedCount,
-      rejectedCount,
-      closedTradesThisRun,
-      portfolioSummary: getDemoPortfolioSummary(),
-      records
-    }
+    pipelineSnapshot
   };
 }

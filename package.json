@@ -13,13 +13,15 @@
     "verify:stage0": "tsx scripts/e2e_stage0_verify.ts",
     "verify:stage1": "tsx scripts/e2e_stage1_verify.ts",
     "verify:stage2": "tsx scripts/e2e_stage2_verify.ts",
-    "verify:stage3": "tsx scripts/e2e_stage3_verify.ts"
+    "verify:stage3": "tsx scripts/e2e_stage3_verify.ts",
+    "verify:stage4": "tsx scripts/e2e_stage4_verify.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "grammy": "^1.46.0",
     "pdfkit": "^0.20.2",
     "zod": "^3.24.1"
   },

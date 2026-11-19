@@ -12,16 +12,30 @@ import {
 import { getDemoPortfolioSummary } from "./services/demoPortfolio.service";
 import { generatePortfolioPdfBuffer } from "./services/pdfReport.service";
 import { sendTelegramPdfReport } from "./agents/executive.agent";
+import {
+  getSubscriberCount,
+  LEGAL_DISCLAIMER_UZ,
+  SUBSCRIPTION_PLANS
+} from "./services/subscription.service";
+import { isTelegramBotRunning, startTelegramBot } from "./services/telegramBot.service";
+import { renderDashboardHtml } from "./views/dashboard.view";
 
 const app = express();
 app.use(express.json());
+
+app.get("/", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.status(200).send(renderDashboardHtml());
+});
 
 app.get("/health", (_req, res) => {
   const portfolio = getDemoPortfolioSummary();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-3-demo-portfolio-pdf",
+    stage: "stage-4-product-dashboard-bot",
     status: "ok",
+    telegramBotRunning: isTelegramBotRunning(),
+    subscribersCount: getSubscriberCount(),
     scheduler: getSchedulerStats(),
     portfolio: {
       currentBalanceUsd: portfolio.currentBalanceUsd,
@@ -41,6 +55,13 @@ app.get("/health/markets", async (_req, res) => {
     allOk,
     checks,
     timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/api/plans", (_req, res) => {
+  res.status(200).json({
+    plans: SUBSCRIPTION_PLANS,
+    disclaimer: LEGAL_DISCLAIMER_UZ
   });
 });
 
@@ -121,8 +142,9 @@ app.post("/api/reports/pdf/telegram", async (_req, res) => {
 
 if (require.main === module) {
   app.listen(env.PORT, () => {
-    console.log(`[CryptoQuant-Copilot] Stage 3 server running on port ${env.PORT}`);
+    console.log(`[CryptoQuant-Copilot] Stage 4 server running on port ${env.PORT}`);
     startScoutScheduler(60_000);
+    startTelegramBot();
   });
 }
 
