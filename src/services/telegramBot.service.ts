@@ -198,6 +198,29 @@ export function startTelegramBot(): void {
   try {
     const bot = new Bot(env.TELEGRAM_BOT_TOKEN);
 
+    // Stage 5.8 Personal Owner Guard (set OWNER_ONLY_MODE=false to unlock public access)
+    bot.use(async (ctx, next) => {
+      const ownerOnly = (process.env.OWNER_ONLY_MODE ?? "true").toLowerCase() !== "false";
+      const configuredId = (env.TELEGRAM_CHANNEL_ID || "").trim();
+      if (ownerOnly && /^\d{5,15}$/.test(configuredId)) {
+        const senderId = String(ctx.from?.id || "");
+        if (senderId !== configuredId) {
+          if (ctx.callbackQuery) {
+            await ctx
+              .answerCallbackQuery({
+                text: "🔒 Ushbu bot hozircha yopiq sinov rejimida.",
+                show_alert: true
+              })
+              .catch(() => {});
+          } else if (ctx.message) {
+            await ctx.reply("🔒 Ushbu bot hozircha yopiq sinov rejimida.").catch(() => {});
+          }
+          return;
+        }
+      }
+      await next();
+    });
+
     const handleTokenCheck = async (
       ctx: {
         reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;

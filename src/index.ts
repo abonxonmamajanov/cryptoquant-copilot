@@ -50,9 +50,33 @@ import { get24hSignalReport, getSignalTrackerSummary } from "./services/signalTr
 import { getActiveNewsShield } from "./services/newsShield.service";
 import { getRecentActivityLogs, pushActivityLog } from "./services/activityLog.service";
 import { addPriceAlert, listPriceAlerts, removePriceAlert } from "./services/priceAlert.service";
+import {
+  createRateLimiter,
+  isSafeSymbolInput,
+  safeErrorHandler,
+  securityHeadersMiddleware
+} from "./middleware/security.middleware";
 
 const app = express();
-app.use(express.json());
+app.disable("x-powered-by");
+app.use(securityHeadersMiddleware);
+app.use(express.json({ limit: "32kb" }));
+
+// General API rate limit (leaves /ping and /health exempt for UptimeRobot)
+const generalApiLimiter = createRateLimiter(80, 60_000, false);
+const heavyApiLimiter = createRateLimiter(18, 60_000, true);
+app.use("/api", generalApiLimiter);
+app.use(
+  [
+    "/api/chart",
+    "/api/reports/pdf",
+    "/api/pipeline/run",
+    "/api/portfolio/buy",
+    "/api/portfolio/close",
+    "/api/alerts"
+  ],
+  heavyApiLimiter
+);
 
 app.get("/", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -67,7 +91,7 @@ app.get("/health", (_req, res) => {
   const portfolio = getDemoPortfolioSummary();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-5.7-pro-edition",
+    stage: "stage-5.8-security-hardened",
     status: "ok",
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),
@@ -132,8 +156,8 @@ app.post("/api/alerts", async (req, res) => {
   try {
     const rawSymbol = String(req.body?.symbol || "").trim();
     const targetPrice = Number(req.body?.targetPrice);
-    if (!rawSymbol) {
-      res.status(400).json({ ok: false, error: "symbol talab qilinadi" });
+    if (!isSafeSymbolInput(rawSymbol)) {
+      res.status(400).json({ ok: false, error: "Noto'g'ri yoki ruxsat etilmagan koin belgisi." });
       return;
     }
     if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
@@ -164,9 +188,8 @@ app.post("/api/alerts", async (req, res) => {
       `Yangi narx eslatma: ${result.alert.symbol} ${result.alert.direction} ${result.alert.targetPrice}`
     );
     res.status(200).json({ ok: true, alert: result.alert, currentPrice, alerts: listPriceAlerts() });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Narx eslatmasi xatoligi";
-    res.status(400).json({ ok: false, error: message });
+  } catch {
+    res.status(400).json({ ok: false, error: "Narx eslatmasini saqlashda xatolik." });
   }
 });
 
@@ -180,28 +203,38 @@ app.get("/api/macro/news", (_req, res) => {
 });
 
 app.get("/api/backtest", async (req, res) => {
-  const symbol = String(req.query.symbol || "BTCUSDT").toUpperCase().trim();
+  const rawSymbol = String(req.query.symbol || "BTCUSDT").trim();
+  if (!isSafeSymbolInput(rawSymbol)) {
+    res.status(400).json({ error: "Noto'g'ri yoki ruxsat etilmagan koin belgisi." });
+    return;
+  }
+  const symbol = rawSymbol.toUpperCase().replace(/\/USDT$/, "");
+  const fullSymbol = symbol.endsWith("USDT") ? symbol : `${symbol}USDT`;
   const parsedLimit = Number(req.query.limit ?? 240);
-  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 240;
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(500, parsedLimit) : 240;
 
-  if (!symbol || isFilteredOutSymbol(symbol)) {
+  if (isFilteredOutSymbol(fullSymbol)) {
     res.status(400).json({
-      error: `Symbol ${symbol || "(empty)"} is filtered out (stablecoin, leveraged token, or non-USDT).`
+      error: "Stablecoin, leveraged token yoki ruxsat etilmagan juftlik."
     });
     return;
   }
 
   try {
-    const result = await runHistoricalBacktest(symbol, limit);
+    const result = await runHistoricalBacktest(fullSymbol, limit);
     res.status(200).json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Backtest error";
     const status = message.includes("filtered out") || message.includes("Insufficient") ? 400 : 500;
-    res.status(status).json({ error: message });
+    res.status(status).json({ error: status === 400 ? message : "Backtest bajarishda xatolik." });
   }
 });
 
 async function handleTokenCheckRoute(symbolParam: string, res: express.Response): Promise<void> {
+  if (!isSafeSymbolInput(symbolParam)) {
+    res.status(400).json({ error: "Noto'g'ri yoki ruxsat etilmagan koin belgisi." });
+    return;
+  }
   try {
     const result = await analyzeTokenOnDemand(symbolParam);
     res.status(200).json({
@@ -220,7 +253,9 @@ async function handleTokenCheckRoute(symbolParam: string, res: express.Response)
       message.includes("bo'sh") ||
       message.includes("400") ||
       message.includes("MEXC request failed");
-    res.status(isClientErr ? 400 : 500).json({ error: message });
+    res.status(isClientErr ? 400 : 500).json({
+      error: isClientErr ? "Koin topilmadi yoki tahlil qilinmaydi." : "Koin tekshiruvida xatolik."
+    });
   }
 }
 
@@ -229,6 +264,10 @@ async function handleTokenChartRoute(
   intervalQuery: unknown,
   res: express.Response
 ): Promise<void> {
+  if (!isSafeSymbolInput(symbolParam)) {
+    res.status(400).json({ error: "Noto'g'ri yoki ruxsat etilmagan koin belgisi." });
+    return;
+  }
   try {
     const intervalParam = String(intervalQuery || "15m").toLowerCase();
     const is1h = intervalParam === "1h" || intervalParam === "60";
@@ -248,9 +287,8 @@ async function handleTokenChartRoute(
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "no-store");
     res.status(200).send(png);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Chart generation error";
-    res.status(400).json({ error: message });
+  } catch {
+    res.status(400).json({ error: "Grafik yaratishda xatolik." });
   }
 }
 
@@ -266,8 +304,8 @@ app.get("/api/chart/:symbol.png", async (req, res) => {
   await handleTokenChartRoute(req.params.symbol, req.query.interval, res);
 });
 
-app.get("/api/token/:symbol/chart.png", async (req, res) => {
-  await handleTokenChartRoute(req.params.symbol, req.query.interval, res);
+app.get("/api/token/:symbol/chart.png", heavyApiLimiter, async (req, res) => {
+  await handleTokenChartRoute(String(req.params.symbol || ""), req.query.interval, res);
 });
 
 app.get("/api/plans", (_req, res) => {
@@ -281,9 +319,8 @@ app.get("/api/scout/latest", async (_req, res) => {
   try {
     const snapshot = getLatestScoutSnapshot() ?? (await triggerScoutScanNow());
     res.status(200).json(snapshot);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Scout scan error";
-    res.status(500).json({ error: message });
+  } catch {
+    res.status(500).json({ error: "Scout skanerlashda xatolik." });
   }
 });
 
@@ -291,9 +328,8 @@ app.post("/api/scout/scan", async (_req, res) => {
   try {
     const snapshot = await triggerScoutScanNow();
     res.status(200).json(snapshot);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Scout scan error";
-    res.status(500).json({ error: message });
+  } catch {
+    res.status(500).json({ error: "Scout skanerlashda xatolik." });
   }
 });
 
@@ -301,9 +337,8 @@ app.get("/api/pipeline/latest", async (_req, res) => {
   try {
     const snapshot = getLatestPipelineSnapshot() ?? (await triggerPipelineRunNow());
     res.status(200).json(snapshot);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Pipeline run error";
-    res.status(500).json({ error: message });
+  } catch {
+    res.status(500).json({ error: "Pipeline ishga tushirishda xatolik." });
   }
 });
 
@@ -311,9 +346,8 @@ app.post("/api/pipeline/run", async (_req, res) => {
   try {
     const snapshot = await triggerPipelineRunNow();
     res.status(200).json(snapshot);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Pipeline run error";
-    res.status(500).json({ error: message });
+  } catch {
+    res.status(500).json({ error: "Pipeline ishga tushirishda xatolik." });
   }
 });
 
@@ -324,8 +358,8 @@ app.get("/api/portfolio", (_req, res) => {
 app.post("/api/portfolio/buy", async (req, res) => {
   try {
     const rawSymbol = String(req.body?.symbol || "").trim();
-    if (!rawSymbol) {
-      res.status(400).json({ ok: false, error: "symbol talab qilinadi" });
+    if (!isSafeSymbolInput(rawSymbol)) {
+      res.status(400).json({ ok: false, error: "Noto'g'ri yoki ruxsat etilmagan koin belgisi." });
       return;
     }
     const rawAmount = req.body?.amountUsd;
@@ -347,17 +381,16 @@ app.post("/api/portfolio/buy", async (req, res) => {
       trade: result.trade,
       portfolio: getDemoPortfolioSummary()
     });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Manual demo buy error";
-    res.status(400).json({ ok: false, error: message, portfolio: getDemoPortfolioSummary() });
+  } catch {
+    res.status(400).json({ ok: false, error: "Demo xaridida xatolik.", portfolio: getDemoPortfolioSummary() });
   }
 });
 
 app.post("/api/portfolio/close", async (req, res) => {
   try {
     const rawSymbol = String(req.body?.symbol || "").trim();
-    if (!rawSymbol) {
-      res.status(400).json({ ok: false, error: "symbol talab qilinadi" });
+    if (!isSafeSymbolInput(rawSymbol)) {
+      res.status(400).json({ ok: false, error: "Noto'g'ri yoki ruxsat etilmagan koin belgisi." });
       return;
     }
     const symbol = normalizeMexcSymbol(rawSymbol);
@@ -378,9 +411,8 @@ app.post("/api/portfolio/close", async (req, res) => {
       trade: result.trade,
       portfolio: getDemoPortfolioSummary()
     });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Manual demo close error";
-    res.status(400).json({ ok: false, error: message, portfolio: getDemoPortfolioSummary() });
+  } catch {
+    res.status(400).json({ ok: false, error: "Demo yopishda xatolik.", portfolio: getDemoPortfolioSummary() });
   }
 });
 
@@ -391,9 +423,8 @@ app.get("/api/reports/pdf", async (_req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'inline; filename="cryptoquant-report.pdf"');
     res.status(200).send(pdfBuffer);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "PDF generation error";
-    res.status(500).json({ error: message });
+  } catch {
+    res.status(500).json({ error: "PDF yaratishda xatolik." });
   }
 });
 
@@ -409,15 +440,20 @@ app.post("/api/reports/pdf/telegram", async (_req, res) => {
       bytes: pdfBuffer.length,
       ...result
     });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Telegram PDF report error";
-    res.status(500).json({ error: message });
+  } catch {
+    res.status(500).json({ error: "Telegram PDF yuborishda xatolik." });
   }
 });
 
+// Non-reflecting 404 fallback + safe production error handler (must be last)
+app.use((_req, res) => {
+  res.status(404).json({ error: "Manzil topilmadi (404)." });
+});
+app.use(safeErrorHandler);
+
 if (require.main === module) {
   const server = app.listen(env.PORT, () => {
-    console.log(`[CryptoQuant-Copilot] Stage 5.5 (Mini App + 5-Agent Live Panel) server running on port ${env.PORT}`);
+    console.log(`[CryptoQuant-Copilot] Stage 5.8 (Security Shield + Wall Street 4-Tab Pro) running on port ${env.PORT}`);
     startScoutScheduler(60_000);
     startDailyReportScheduler();
     startTelegramBot();
