@@ -100,12 +100,12 @@ export async function runTechnicianAgent(
 
   const atrPct = entryPrice > 0 ? (atr14 / entryPrice) * 100 : 0;
   const tradeMode: TradeMode =
-    modeHint ?? (ema9 > ema21 * 1.003 && rsi14 >= 45 && rsi14 <= 66 && atrPct >= 0.4 ? "SWING" : "INTRADAY");
+    modeHint ?? (ema9 > ema21 * 1.003 && rsi14 >= 44 && rsi14 <= 64 && atrPct >= 0.4 ? "SWING" : "INTRADAY");
 
   const roundedEntry = roundPrice(entryPrice);
-  const mult1 = tradeMode === "SWING" ? 1.6 : 1.3;
-  const mult2 = tradeMode === "SWING" ? 2.8 : 2.2;
-  const mult3 = tradeMode === "SWING" ? 4.2 : 3.2;
+  const mult1 = tradeMode === "SWING" ? 1.6 : 1.35;
+  const mult2 = tradeMode === "SWING" ? 2.8 : 2.3;
+  const mult3 = tradeMode === "SWING" ? 4.2 : 3.4;
 
   let stopLossPrice: number;
   let riskPerUnit: number;
@@ -127,7 +127,7 @@ export async function runTechnicianAgent(
 
   const tp1Price = roundPrice(roundedEntry + riskPerUnit * mult1);
   const tp2Price = roundPrice(
-    Math.max(roundedEntry + riskPerUnit * mult2, resistanceLevel * 1.01, tp1Price * 1.005)
+    Math.max(roundedEntry + riskPerUnit * Math.max(mult2, 2.25), resistanceLevel * 1.01, tp1Price * 1.005)
   );
   const tp3Price = roundPrice(
     Math.max(roundedEntry + riskPerUnit * mult3, tp2Price + riskPerUnit * 1.0, tp2Price * 1.008)
@@ -149,13 +149,25 @@ export async function runTechnicianAgent(
 
   const riskRewardRatio = Number(((takeProfitPrice - roundedEntry) / riskPerUnit).toFixed(2));
 
-  // Score (0-100)
-  let techScore = 40;
-  if (ema9 > ema21) techScore += 20;
-  if (entryPrice >= ema9) techScore += 10;
-  if (rsi14 >= 42 && rsi14 <= 68) techScore += 20;
-  else if (rsi14 > 76) techScore -= 15;
-  if (riskRewardRatio >= 2.0) techScore += 10;
+  // Stage 5.7 Early-Entry & Profitability Score (0-100)
+  const distAboveEma21Pct = ema21 > 0 ? ((entryPrice - ema21) / ema21) * 100 : 0;
+  const distAboveSupportPct = supportLevel > 0 ? ((entryPrice - supportLevel) / supportLevel) * 100 : 0;
+  const distToEma9Pct = ema9 > 0 ? Math.abs((entryPrice - ema9) / ema9) * 100 : 0;
+
+  let techScore = 35;
+  if (ema9 > ema21) techScore += 18;
+  // Reward healthy RSI sweet spot (44..64)
+  if (rsi14 >= 44 && rsi14 <= 64) techScore += 22;
+  else if (rsi14 >= 38 && rsi14 < 44) techScore += 10;
+  else if (rsi14 > 64 && rsi14 <= 70) techScore += 6;
+  else if (rsi14 > 72) techScore -= 18;
+
+  // Reward price close to Support / EMA9 and penalize >3% stretch above EMA21
+  if (distToEma9Pct <= 1.5 && distAboveEma21Pct <= 3.0) techScore += 12;
+  else if (distAboveEma21Pct > 3.0) techScore -= 15;
+
+  if (distAboveSupportPct <= 3.5) techScore += 5;
+  if (riskRewardRatio >= 2.2) techScore += 10;
   techScore = Math.max(0, Math.min(100, Math.round(techScore)));
 
   const isBullishTrend = ema9 >= ema21 * 0.997 && rsi14 >= 32;

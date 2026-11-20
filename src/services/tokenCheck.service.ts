@@ -3,7 +3,7 @@ import { isFilteredOutSymbol, ScoutCandidate } from "../agents/scout.agent";
 import { runTechnicianAgent } from "../agents/technician.agent";
 import { runMacroFlowAgent } from "../agents/macroFlow.agent";
 import { runCriticRiskAgent } from "../agents/criticRisk.agent";
-import { formatEntryZoneRange } from "../agents/executive.agent";
+import { formatEntryZoneRange, formatThreeLineAgentSummary } from "../agents/executive.agent";
 import { EvaluatedSignalRecord } from "./pipeline.service";
 import { generate15mChartPng } from "./chartGenerator.service";
 import { runFundamentalShield } from "./fundamental.service";
@@ -86,11 +86,11 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
   const scoutScore = Math.round(clamp(volPoints + momPoints + liqPoints, 0, 100));
 
   const reasons: string[] = [];
-  if (volumeSpikeRatio15m >= 2.0) reasons.push(`15m hajm sakrashi ${volumeSpikeRatio15m}x`);
+  if (volumeSpikeRatio15m >= 1.6) reasons.push(`15m hajm kengayishi ${volumeSpikeRatio15m}x`);
   if (Math.abs(momentum15mPct) >= 1.2) {
     reasons.push(`15m impuls ${momentum15mPct > 0 ? "+" : ""}${momentum15mPct}%`);
   }
-  if (Math.abs(priceChange24hPct) >= 5.0) {
+  if (Math.abs(priceChange24hPct) >= 1.5) {
     reasons.push(`24s harakat ${priceChange24hPct > 0 ? "+" : ""}${priceChange24hPct}%`);
   }
   if (reasons.length === 0) reasons.push("On-demand tekshiruv");
@@ -104,7 +104,7 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
     volumeSpikeRatio15m,
     momentum15mPct,
     scoutScore,
-    isAnomaly: volumeSpikeRatio15m >= 1.8 || Math.abs(momentum15mPct) >= 1.5 || scoutScore >= 55,
+    isAnomaly: volumeSpikeRatio15m >= 1.6 || Math.abs(momentum15mPct) >= 1.5 || scoutScore >= 60,
     isNewAlert: false,
     reasons,
     detectedAt: new Date().toISOString()
@@ -141,9 +141,12 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
   const tradeMode = criticRisk.tradeMode ?? technician.tradeMode ?? "INTRADAY";
   const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
   const entryZone = formatEntryZoneRange(technician.entryPrice);
-  const fngStr = fundamental.fearGreed
-    ? ` | F&G: ${fundamental.fearGreed.value}`
-    : "";
+  const threeLineSummary = formatThreeLineAgentSummary(
+    technician,
+    macroFlow,
+    criticRisk,
+    fundamental
+  );
 
   const caption = [
     `🔎 *CRYPTOQUANT-COPILOT* | ${modeHeader}`,
@@ -159,12 +162,8 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
     `🛑 *Stop-Loss (SL):* \`${technician.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${technician.riskRewardRatio}`,
     ``,
-    `🧠 *Agentlar xulosasi:*`,
-    `• *Scout:* 24s ${priceChange24hPct >= 0 ? "+" : ""}${priceChange24hPct}% | 15m hajm ${volumeSpikeRatio15m}x`,
-    `• *Technician:* ${technician.summary}`,
-    `• *Macro & Flow:* ${macroFlow.summary} (${macroFlow.regime})`,
-    `• *Critic:* ${criticRisk.reasons.slice(0, 2).join("; ")}`,
-    `🛡️ *Fundamental:* ${fundamental.badgeUz}${fngStr}`,
+    `🧠 *5-Agent tahlili:*`,
+    ...threeLineSummary,
     ``,
     `⚠️ _Moliyaviy maslahat emas. Riskni o'zingiz boshqaring._`
   ].join("\n");

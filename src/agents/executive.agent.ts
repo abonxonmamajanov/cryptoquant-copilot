@@ -9,12 +9,14 @@ import type { FundamentalReport } from "../services/fundamental.service";
 import { buildTelegramSignalReplyMarkup } from "../utils/exchangeLinks";
 import { fetchMexcKlines } from "../services/mexcClient.service";
 import { generate15mChartPng } from "../services/chartGenerator.service";
+import { getCurrentTradingSession } from "../utils/tradingSession";
 
 export interface ExecutiveDispatchResult {
   symbol: string;
   mode: "LIVE_TELEGRAM" | "DRY_RUN";
   sent: boolean;
   telegramMessage: string;
+  telegramMessageId: number | null;
   chartAttached?: boolean;
   error?: string;
 }
@@ -22,6 +24,7 @@ export interface ExecutiveDispatchResult {
 export interface TelegramSendResult {
   mode: "LIVE_TELEGRAM" | "DRY_RUN";
   sent: boolean;
+  telegramMessageId: number | null;
   error?: string;
 }
 
@@ -38,6 +41,39 @@ export function formatEntryZoneRange(entryPrice: number): string {
   return `${low} – ${high}`;
 }
 
+export function formatThreeLineAgentSummary(
+  tech: TechnicalAnalysisResult,
+  macro: MacroFlowResult,
+  critic: CriticRiskResult,
+  fundamental?: FundamentalReport
+): string[] {
+  const trend1h = macro.trend1h ?? macro.regime;
+  const trend4h = macro.trend4h ?? macro.regime;
+
+  let rsiStateUz = "Sog'lom";
+  if (tech.rsi14 < 40) rsiStateUz = "Sotilgan";
+  else if (tech.rsi14 <= 64) rsiStateUz = "Sog'lom";
+  else if (tech.rsi14 <= 72) rsiStateUz = "Faol";
+  else rsiStateUz = "Qizigan";
+
+  let buyerStrengthUz = "Muvozanatli";
+  if (macro.bidAskRatio >= 1.25) buyerStrengthUz = "Xaridorlar ustun";
+  else if (macro.bidAskRatio < 0.9) buyerStrengthUz = "Sotuv bosimi";
+
+  const exchanges = (macro.exchanges && macro.exchanges.length > 0 ? macro.exchanges : ["MEXC"]).join(
+    "+"
+  );
+  const fundamentalBadge = fundamental?.badgeUz ?? "✅ Sog'lom";
+  const sessionLabelUz = getCurrentTradingSession().labelUz;
+  const softWarning = critic.softWarnings?.[0] || "";
+
+  return [
+    `• *Trend:* 15M/${trend1h}/${trend4h} | RSI: ${Math.round(tech.rsi14)} (${rsiStateUz})`,
+    `• *Bozor:* ${buyerStrengthUz} (${macro.bidAskRatio}x, ${exchanges}) | Fundamental: ${fundamentalBadge}`,
+    `• *Eslatma:* ${sessionLabelUz}${softWarning ? " • " + softWarning : ""}`
+  ];
+}
+
 export function formatTelegramSignalCard(
   scout: ScoutCandidate,
   tech: TechnicalAnalysisResult,
@@ -51,11 +87,8 @@ export function formatTelegramSignalCard(
   const tp1 = tech.tp1Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 0.55);
   const tp2 = tech.tp2Price ?? tech.takeProfitPrice;
   const tp3 = tech.tp3Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.45);
-  const fngText = fundamental?.fearGreed
-    ? ` | F&G: ${fundamental.fearGreed.value} (${fundamental.fearGreed.classification})`
-    : "";
-  const fundLine = fundamental ? `🛡️ *Fundamental:* ${fundamental.badgeUz}${fngText}` : null;
   const starsText = critic.longTermStars ? ` | ${critic.longTermStars.label}` : "";
+  const threeLineSummary = formatThreeLineAgentSummary(tech, macro, critic, fundamental);
 
   const lines = [
     `🚀 *CRYPTOQUANT-COPILOT SIGNAL* | ${modeHeader}`,
@@ -71,21 +104,12 @@ export function formatTelegramSignalCard(
     `🛑 *Stop-Loss (SL):* \`${tech.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${tech.riskRewardRatio}`,
     ``,
-    `🧠 *Agentlar xulosasi:*`,
-    `• *Scout:* 24s ${scout.priceChange24hPct >= 0 ? "+" : ""}${scout.priceChange24hPct}% | 15m hajm ${scout.volumeSpikeRatio15m}x`,
-    `• *Technician:* ${tech.summary}`,
-    `• *Macro & Flow:* ${macro.summary} (${macro.regime})`,
-    `• *Critic:* TASDIQLANDI (${critic.reasons[0]})`
+    `🧠 *5-Agent tahlili:*`,
+    ...threeLineSummary,
+    ``,
+    `⚠️ _Moliyaviy maslahat emas. Riskni o'zingiz boshqaring._`
   ];
 
-  if (fundLine) {
-    lines.push(fundLine);
-  }
-  if (critic.softWarnings && critic.softWarnings.length > 0) {
-    lines.push(`⚠️ *Ehtiyot eslatma:* ${critic.softWarnings.slice(0, 2).join("; ")}`);
-  }
-
-  lines.push(``, `⚠️ _Moliyaviy maslahat emas. Riskni o'zingiz boshqaring._`);
   return lines.join("\n");
 }
 
@@ -153,34 +177,48 @@ function hasTelegramCredentials(): boolean {
 
 export async function sendTelegramTextMessage(
   text: string,
+  replyToMessageId?: number | null,
   replyMarkup?: Record<string, unknown>
 ): Promise<TelegramSendResult> {
   if (!hasTelegramCredentials()) {
     return {
       mode: "DRY_RUN",
-      sent: false
+      sent: false,
+      telegramMessageId: null
     };
   }
 
   try {
-    await axios.post(
+    const payload: Record<string, unknown> = {
+      chat_id: env.TELEGRAM_CHANNEL_ID,
+      text,
+      parse_mode: "Markdown"
+    };
+    if (typeof replyToMessageId === "number" && Number.isFinite(replyToMessageId) && replyToMessageId > 0) {
+      payload.reply_to_message_id = replyToMessageId;
+      payload.allow_sending_without_reply = true;
+    }
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
+
+    const res = await axios.post<{ ok?: boolean; result?: { message_id?: number } }>(
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        chat_id: env.TELEGRAM_CHANNEL_ID,
-        text,
-        parse_mode: "Markdown",
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
-      },
+      payload,
       { timeout: 10000 }
     );
+    const msgId =
+      typeof res.data?.result?.message_id === "number" ? res.data.result.message_id : null;
     return {
       mode: "LIVE_TELEGRAM",
-      sent: true
+      sent: true,
+      telegramMessageId: msgId
     };
   } catch (err) {
     return {
       mode: "LIVE_TELEGRAM",
       sent: false,
+      telegramMessageId: null,
       error: err instanceof Error ? err.message : "Telegram dispatch error"
     };
   }
@@ -194,7 +232,8 @@ export async function sendTelegramPdfReport(
   if (!hasTelegramCredentials()) {
     return {
       mode: "DRY_RUN",
-      sent: false
+      sent: false,
+      telegramMessageId: null
     };
   }
 
@@ -222,18 +261,29 @@ export async function sendTelegramPdfReport(
       return {
         mode: "LIVE_TELEGRAM",
         sent: false,
+        telegramMessageId: null,
         error: `Telegram sendDocument HTTP ${response.status}: ${bodyText}`
       };
     }
 
+    let msgId: number | null = null;
+    try {
+      const json = (await response.json()) as { result?: { message_id?: number } };
+      if (typeof json?.result?.message_id === "number") msgId = json.result.message_id;
+    } catch {
+      // Non-fatal
+    }
+
     return {
       mode: "LIVE_TELEGRAM",
-      sent: true
+      sent: true,
+      telegramMessageId: msgId
     };
   } catch (err) {
     return {
       mode: "LIVE_TELEGRAM",
       sent: false,
+      telegramMessageId: null,
       error: err instanceof Error ? err.message : "Telegram PDF dispatch error"
     };
   }
@@ -270,6 +320,7 @@ export async function runExecutiveAgent(
       mode: "DRY_RUN",
       sent: false,
       telegramMessage,
+      telegramMessageId: null,
       chartAttached: Boolean(chartPng)
     };
   }
@@ -297,11 +348,19 @@ export async function runExecutiveAgent(
       );
 
       if (response.ok) {
+        let msgId: number | null = null;
+        try {
+          const json = (await response.json()) as { result?: { message_id?: number } };
+          if (typeof json?.result?.message_id === "number") msgId = json.result.message_id;
+        } catch {
+          // Non-fatal
+        }
         return {
           symbol: scout.symbol,
           mode: "LIVE_TELEGRAM",
           sent: true,
           telegramMessage,
+          telegramMessageId: msgId,
           chartAttached: true
         };
       }
@@ -310,13 +369,14 @@ export async function runExecutiveAgent(
     }
   }
 
-  const res = await sendTelegramTextMessage(telegramMessage, replyMarkup);
+  const res = await sendTelegramTextMessage(telegramMessage, null, replyMarkup);
 
   return {
     symbol: scout.symbol,
     mode: res.mode,
     sent: res.sent,
     telegramMessage,
+    telegramMessageId: res.telegramMessageId,
     chartAttached: false,
     ...(res.error ? { error: res.error } : {})
   };

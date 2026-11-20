@@ -15,6 +15,7 @@ export interface MacroFlowResult {
   trend1h?: TrendRegime;
   trend4h?: TrendRegime;
   fundingRatePct?: number | null;
+  exchanges?: string[];
   macroScore: number;
   summary: string;
   latencyMs: number;
@@ -48,6 +49,29 @@ async function detectTimeframeTrend(symbol: string, interval: "1h" | "4h"): Prom
     return "NEUTRAL";
   } catch {
     return "NEUTRAL";
+  }
+}
+
+async function fetchBinanceOrderBookDepth(
+  symbol: string
+): Promise<{ bidUsd: number; askUsd: number } | null> {
+  try {
+    const res = await axios.get<{
+      bids?: Array<[string, string]>;
+      asks?: Array<[string, string]>;
+    }>(`https://api.binance.com/api/v3/depth?symbol=${encodeURIComponent(symbol)}&limit=20`, {
+      timeout: 2500,
+      httpsAgent: resilientHttpsAgent
+    });
+    const bids = res.data?.bids ?? [];
+    const asks = res.data?.asks ?? [];
+    if (bids.length === 0 || asks.length === 0) return null;
+    const bidUsd = bids.reduce((sum, [p, q]) => sum + Number(p) * Number(q), 0);
+    const askUsd = asks.reduce((sum, [p, q]) => sum + Number(p) * Number(q), 0);
+    if (!Number.isFinite(bidUsd) || !Number.isFinite(askUsd)) return null;
+    return { bidUsd, askUsd };
+  } catch {
+    return null;
   }
 }
 
@@ -93,16 +117,29 @@ async function getBtcChange1hPct(): Promise<number> {
 
 export async function runMacroFlowAgent(symbol: string): Promise<MacroFlowResult> {
   const started = Date.now();
-  const [book, btcChange1hPct, trend1h, trend4h, fundingRatePct] = await Promise.all([
+  const [book, binanceBook, btcChange1hPct, trend1h, trend4h, fundingRatePct] = await Promise.all([
     fetchMexcOrderBook(symbol, 20),
+    fetchBinanceOrderBookDepth(symbol),
     getBtcChange1hPct(),
     detectTimeframeTrend(symbol, "1h"),
     detectTimeframeTrend(symbol, "4h"),
     getFundingRatePct(symbol)
   ]);
 
-  const bidDepthUsd = Math.round(book.bids.reduce((sum, [p, q]) => sum + p * q, 0));
-  const askDepthUsd = Math.round(book.asks.reduce((sum, [p, q]) => sum + p * q, 0));
+  const mexcBidUsd = book.bids.reduce((sum, [p, q]) => sum + p * q, 0);
+  const mexcAskUsd = book.asks.reduce((sum, [p, q]) => sum + p * q, 0);
+
+  const exchanges: string[] = ["MEXC"];
+  let totalBidUsd = mexcBidUsd;
+  let totalAskUsd = mexcAskUsd;
+  if (binanceBook) {
+    exchanges.push("Binance");
+    totalBidUsd += binanceBook.bidUsd;
+    totalAskUsd += binanceBook.askUsd;
+  }
+
+  const bidDepthUsd = Math.round(totalBidUsd);
+  const askDepthUsd = Math.round(totalAskUsd);
   const bidAskRatio = askDepthUsd > 0 ? Number((bidDepthUsd / askDepthUsd).toFixed(2)) : 1;
 
   const bestBid = book.bids[0]?.[0] ?? 0;
@@ -135,7 +172,7 @@ export async function runMacroFlowAgent(symbol: string): Promise<MacroFlowResult
     regime = "BULLISH";
   }
 
-  const summary = `BTC 1s: ${btcChange1hPct >= 0 ? "+" : ""}${btcChange1hPct}%, 1H/4H: ${trend1h}/${trend4h}, Bid/Ask: ${bidAskRatio}x, Spread: ${spreadPct}%`;
+  const summary = `BTC 1s: ${btcChange1hPct >= 0 ? "+" : ""}${btcChange1hPct}%, 1H/4H: ${trend1h}/${trend4h}, Bid/Ask: ${bidAskRatio}x (${exchanges.join("+")}), Spread: ${spreadPct}%`;
 
   return {
     symbol,
@@ -148,6 +185,7 @@ export async function runMacroFlowAgent(symbol: string): Promise<MacroFlowResult
     trend1h,
     trend4h,
     fundingRatePct,
+    exchanges,
     macroScore,
     summary,
     latencyMs: Date.now() - started

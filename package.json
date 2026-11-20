@@ -19,6 +19,7 @@
     "verify:stage5_2": "tsx scripts/e2e_stage5_2_verify.ts",
     "verify:stage5_4": "tsx scripts/e2e_stage5_4_verify.ts",
     "verify:stage5_5": "tsx scripts/e2e_stage5_5_verify.ts",
+    "verify:stage5_7": "tsx scripts/e2e_stage5_7_verify.ts",
     "stress:test": "tsx scripts/stress_test_full.ts"
   },
   "dependencies": {

@@ -13,7 +13,7 @@ const STABLECOIN_BASES = new Set([
 
 const LEVERAGED_SUFFIXES = ["3L", "3S", "5L", "5S", "2L", "2S", "UP", "DOWN", "BULL", "BEAR"];
 
-const MIN_QUOTE_VOLUME_24H = 1_000_000; // $1M minimum 24h liquidity
+const MIN_QUOTE_VOLUME_24H = 2_000_000; // $2M minimum strong 24h liquidity
 const MAX_CANDIDATES_TO_DEEP_SCAN = 15;
 const COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes per symbol
 
@@ -62,6 +62,32 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
+function computePreRankScore(ticker: MexcTicker24h): number {
+  const chg = ticker.priceChangePercent;
+  const liqWeight = Math.log10(Math.max(ticker.quoteVolume, 10));
+  let moveScore = 0;
+
+  if (chg >= 1.5 && chg <= 14) {
+    // Sweet spot: early accumulation & fresh breakout
+    moveScore = 18 + (12 - Math.abs(chg - 6.5));
+  } else if (chg >= 0 && chg < 1.5) {
+    // Pre-breakout quiet accumulation
+    moveScore = 10 + chg * 4;
+  } else if (chg > 14 && chg <= 22) {
+    // Mid-trend continuation
+    moveScore = 10;
+  } else if (chg > 22) {
+    // Penalize late overextended FOMO pumps
+    moveScore = Math.max(0.5, 5 - (chg - 22) * 0.35);
+  } else if (chg >= -5) {
+    moveScore = 5;
+  } else {
+    moveScore = 1;
+  }
+
+  return moveScore * liqWeight;
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -98,13 +124,9 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
     eligible.push(t);
   }
 
-  // Pre-rank by activity: positive momentum + strong 24h liquidity
+  // Pre-rank favoring early accumulation & fresh breakouts (+1.5%..+14%) with >= $2M liquidity
   const preRanked = [...eligible]
-    .sort((a, b) => {
-      const scoreA = Math.abs(a.priceChangePercent) * Math.log10(Math.max(a.quoteVolume, 10));
-      const scoreB = Math.abs(b.priceChangePercent) * Math.log10(Math.max(b.quoteVolume, 10));
-      return scoreB - scoreA;
-    })
+    .sort((a, b) => computePreRankScore(b) - computePreRankScore(a))
     .slice(0, MAX_CANDIDATES_TO_DEEP_SCAN);
 
   const now = Date.now();
@@ -129,19 +151,71 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
 
       const priceChange24hPct = Number(ticker.priceChangePercent.toFixed(2));
 
-      // Compute Scout Score (0-100)
-      const volPoints = clamp((volumeSpikeRatio15m - 1) * 20, 0, 50);
-      const momPoints = clamp(Math.abs(momentum15mPct) * 10, 0, 30);
-      const liqPoints = clamp((Math.log10(ticker.quoteVolume) - 6) * 10, 0, 20);
-      const scoutScore = Math.round(clamp(volPoints + momPoints + liqPoints, 0, 100));
+      // Compute Stage 5.7 Early-Breakout Scout Score (0-100)
+      let volPoints = 0;
+      if (volumeSpikeRatio15m >= 1.6 && volumeSpikeRatio15m <= 5.0) {
+        volPoints = clamp(24 + (volumeSpikeRatio15m - 1.6) * 5.2, 24, 42);
+      } else if (volumeSpikeRatio15m > 5.0) {
+        volPoints = clamp(34 - (volumeSpikeRatio15m - 5.0) * 1.8, 16, 34);
+      } else {
+        volPoints = clamp((volumeSpikeRatio15m - 1) * 28, 0, 20);
+      }
+
+      let breakoutPoints = 0;
+      if (priceChange24hPct >= 1.5 && priceChange24hPct <= 14) {
+        breakoutPoints = 24;
+      } else if (priceChange24hPct >= 0 && priceChange24hPct < 1.5) {
+        breakoutPoints = 14;
+      } else if (priceChange24hPct > 14 && priceChange24hPct <= 22) {
+        breakoutPoints = 8;
+      } else if (priceChange24hPct > 22) {
+        // Penalize late overextended FOMO pumps
+        breakoutPoints = -18 - Math.min(16, (priceChange24hPct - 22) * 0.8);
+      } else {
+        breakoutPoints = 3;
+      }
+
+      let momPoints = 0;
+      if (momentum15mPct >= 0.3 && momentum15mPct <= 3.5) {
+        momPoints = clamp(8 + momentum15mPct * 4.2, 8, 18);
+      } else if (momentum15mPct > 3.5) {
+        momPoints = 9;
+      } else {
+        momPoints = clamp(Math.abs(momentum15mPct) * 2.5, 0, 6);
+      }
+
+      const liqPoints =
+        ticker.quoteVolume >= MIN_QUOTE_VOLUME_24H
+          ? clamp(8 + (Math.log10(ticker.quoteVolume) - 6.3) * 6.5, 8, 16)
+          : 0;
+
+      const scoutScore = Math.round(clamp(volPoints + breakoutPoints + momPoints + liqPoints, 0, 100));
 
       const reasons: string[] = [];
-      if (volumeSpikeRatio15m >= 2.0) reasons.push(`15m hajm sakrashi ${volumeSpikeRatio15m}x`);
-      if (Math.abs(momentum15mPct) >= 1.2) reasons.push(`15m impuls ${momentum15mPct > 0 ? "+" : ""}${momentum15mPct}%`);
-      if (Math.abs(priceChange24hPct) >= 5.0) reasons.push(`24s harakat ${priceChange24hPct > 0 ? "+" : ""}${priceChange24hPct}%`);
+      if (priceChange24hPct >= 1.5 && priceChange24hPct <= 14) {
+        reasons.push(`Erta breakout zonasi (+${priceChange24hPct}%)`);
+      } else if (priceChange24hPct > 22) {
+        reasons.push(`Kechki FOMO o'sishi (+${priceChange24hPct}%)`);
+      }
+      if (volumeSpikeRatio15m >= 1.6 && volumeSpikeRatio15m <= 5.0) {
+        reasons.push(`Yangi 15m hajm kengayishi ${volumeSpikeRatio15m}x`);
+      } else if (volumeSpikeRatio15m > 5.0) {
+        reasons.push(`Kuchli 15m hajm sakrashi ${volumeSpikeRatio15m}x`);
+      }
+      if (momentum15mPct >= 0.5) {
+        reasons.push(`15m impuls +${momentum15mPct}%`);
+      }
+      if (ticker.quoteVolume >= MIN_QUOTE_VOLUME_24H) {
+        reasons.push(`Kuchli likvidlik ($${(ticker.quoteVolume / 1_000_000).toFixed(1)}M)`);
+      }
       if (reasons.length === 0) reasons.push("Yuqori likvidli faol juftlik");
 
-      const isAnomaly = volumeSpikeRatio15m >= 1.8 || Math.abs(momentum15mPct) >= 1.5 || scoutScore >= 55;
+      const isEarlyBreakout =
+        priceChange24hPct >= 1.5 && priceChange24hPct <= 14 && volumeSpikeRatio15m >= 1.6;
+      const isAnomaly =
+        isEarlyBreakout ||
+        (volumeSpikeRatio15m >= 1.6 && priceChange24hPct <= 22) ||
+        scoutScore >= 60;
 
       let isNewAlert = false;
       if (isAnomaly) {

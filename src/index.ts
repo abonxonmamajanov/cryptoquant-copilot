@@ -46,8 +46,10 @@ import {
 import { generate15mChartPng } from "./services/chartGenerator.service";
 import { buildTradingViewMexcUrl } from "./utils/exchangeLinks";
 import { getFiveAgentsLiveStatus } from "./services/agentTelemetry.service";
-import { getSignalTrackerSummary } from "./services/signalTracker.service";
+import { get24hSignalReport, getSignalTrackerSummary } from "./services/signalTracker.service";
 import { getActiveNewsShield } from "./services/newsShield.service";
+import { getRecentActivityLogs, pushActivityLog } from "./services/activityLog.service";
+import { addPriceAlert, listPriceAlerts, removePriceAlert } from "./services/priceAlert.service";
 
 const app = express();
 app.use(express.json());
@@ -65,7 +67,7 @@ app.get("/health", (_req, res) => {
   const portfolio = getDemoPortfolioSummary();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-5-production-100",
+    stage: "stage-5.7-pro-edition",
     status: "ok",
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),
@@ -108,8 +110,69 @@ app.get("/api/agents/status", (_req, res) => {
   res.status(200).json(getFiveAgentsLiveStatus());
 });
 
+app.get("/api/logs/recent", (req, res) => {
+  const rawLimit = Number(req.query.limit ?? 25);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(40, Math.floor(rawLimit)) : 25;
+  res.status(200).json({ logs: getRecentActivityLogs(limit) });
+});
+
 app.get("/api/signals/tracker", (_req, res) => {
   res.status(200).json(getSignalTrackerSummary());
+});
+
+app.get("/api/signals/report24h", (_req, res) => {
+  res.status(200).json(get24hSignalReport());
+});
+
+app.get("/api/alerts", (_req, res) => {
+  res.status(200).json({ alerts: listPriceAlerts() });
+});
+
+app.post("/api/alerts", async (req, res) => {
+  try {
+    const rawSymbol = String(req.body?.symbol || "").trim();
+    const targetPrice = Number(req.body?.targetPrice);
+    if (!rawSymbol) {
+      res.status(400).json({ ok: false, error: "symbol talab qilinadi" });
+      return;
+    }
+    if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
+      res.status(400).json({ ok: false, error: "Maqsadli narx musbat son bo'lishi kerak." });
+      return;
+    }
+    const clean = rawSymbol.toUpperCase().replace("/USDT", "");
+    const fullSymbol = clean.endsWith("USDT") ? clean : `${clean}USDT`;
+    if (isFilteredOutSymbol(fullSymbol)) {
+      res.status(400).json({ ok: false, error: "Stablecoin yoki ruxsat etilmagan juftlik." });
+      return;
+    }
+
+    let currentPrice = Number(req.body?.currentPrice);
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
+      currentPrice = await fetchMexcTickerPrice(fullSymbol);
+    }
+
+    const result = addPriceAlert(fullSymbol, targetPrice, currentPrice);
+    if (!result.ok || !result.alert) {
+      res.status(400).json({ ok: false, error: result.error || "Eslatma saqlanmadi" });
+      return;
+    }
+
+    pushActivityLog(
+      "ALERT",
+      "INFO",
+      `Yangi narx eslatma: ${result.alert.symbol} ${result.alert.direction} ${result.alert.targetPrice}`
+    );
+    res.status(200).json({ ok: true, alert: result.alert, currentPrice, alerts: listPriceAlerts() });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Narx eslatmasi xatoligi";
+    res.status(400).json({ ok: false, error: message });
+  }
+});
+
+app.delete("/api/alerts/:id", (req, res) => {
+  const removed = removePriceAlert(String(req.params.id || ""));
+  res.status(200).json({ ok: removed, alerts: listPriceAlerts() });
 });
 
 app.get("/api/macro/news", (_req, res) => {

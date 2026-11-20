@@ -85,8 +85,8 @@ export function getFiveAgentsLiveStatus() {
         verdict: r.criticRisk.verdict,
         confidenceScore: r.criticRisk.confidenceScore,
         tradeMode: r.criticRisk.tradeMode ?? r.technician.tradeMode ?? "INTRADAY",
-        shortStars: r.criticRisk.longTermStars?.label ?? "★★★☆☆ (3/5)",
-        longStars: r.criticRisk.longTermStars?.label ?? "★★★☆☆ (3/5)",
+        shortStars: r.criticRisk.longTermStars?.label ?? "⭐⭐⭐☆☆ (3/5)",
+        longStars: r.criticRisk.longTermStars?.label ?? "⭐⭐⭐☆☆ (3/5)",
         reasons: r.criticRisk.reasons
       }))
     },

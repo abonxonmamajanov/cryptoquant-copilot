@@ -27,6 +27,13 @@ import {
   updateSubscriberRisk,
   upsertSubscriber
 } from "./subscription.service";
+import { addPriceAlert, listPriceAlerts, removePriceAlert } from "./priceAlert.service";
+import { calculatePositionRisk } from "../utils/tradingSession";
+import { getActiveNewsShield } from "./newsShield.service";
+import { get24hSignalReport } from "./signalTracker.service";
+import { pushActivityLog } from "./activityLog.service";
+
+const BRAND_MOTTO = "Tez foyda emas — doimiy xotirjam, aniq savdo";
 
 let botInstance: Bot | null = null;
 let botRunning = false;
@@ -269,7 +276,7 @@ export function startTelegramBot(): void {
       const uid = String(ctx.from?.id ?? "unknown");
       const user = upsertSubscriber(uid, ctx.from?.username ?? null, ctx.from?.first_name ?? null);
       await ctx.reply(
-        `Assalomu alaykum, *${user.firstName || "Treyder"}*! 👋\n\n*CryptoQuant-Copilot* — 5 ta mustaqil agentdan iborat MEXC Spot kripto-signal tizimiga xush kelibsiz.\n\n📌 Tarif: *${user.tier}* | Risk: *${user.riskProfile}* | Rejim: *${getActiveSignalMode()}*\n🔎 Koin tekshirish: \`SOL\`, \`BTC\` yoki \`/check HYPE\`\n🛒 Demo xarid: \`/buy SOL 100\` | 📂 Ochiq savdolar: \`/positions\``,
+        `Assalomu alaykum, *${user.firstName || "Treyder"}*! 👋\n\n*CryptoQuant-Copilot* — 5 ta mustaqil agentdan iborat MEXC Spot kripto-signal tizimiga xush kelibsiz.\n_"${BRAND_MOTTO}"_\n\n📌 Tarif: *${user.tier}* | Risk: *${user.riskProfile}* | Rejim: *${getActiveSignalMode()}*\n🔎 Koin tekshirish: \`SOL\`, \`BTC\` yoki \`/check HYPE\`\n🛒 Demo xarid: \`/buy SOL 100\` | 📂 Ochiq savdolar: \`/positions\`\n🔔 Narx eslatma: \`/alert BTC 95000\` | 🧮 Risk kalkulyator: \`/calc 500 2 100 96\``,
         { parse_mode: "Markdown", reply_markup: buildMainMenu() }
       );
     });
@@ -306,6 +313,122 @@ export function startTelegramBot(): void {
       await ctx.reply(
         `🔀 *Signal Rejimini Tanlang* (Hozirgi: *${current}*)\n\n• *HYBRID:* Intraday (15M) + Swing (4H) signallari\n• *INTRADAY:* Faqat tezkor 15M signallar\n• *SWING:* Faqat kuchli 1H/4H trenddagi Swing signallar`,
         { parse_mode: "Markdown", reply_markup: buildModeKeyboard(current) }
+      );
+    });
+
+    bot.command("news", async (ctx) => {
+      const shield = getActiveNewsShield();
+      const text = shield.active
+        ? `🚨 *USD MACRO NEWS SHIELD — FAOL!*\n\n📰 Tadbir: *${shield.eventTitle || "High-Impact USD News"}*\n🛡️ Holat: ${shield.reason || "Yangi signallar vaqtincha bloklangan."}`
+        : `🛡️ *USD Macro News Shield — SOKIN*\n\n✅ Hozircha yuqori ta'sirli AQSh makroiqtisodiy yangiliklari (CPI/FOMC/NFP) blokirovkasi faol emas. 5-agent tizimi odatiy rejimda ishlamoqda.`;
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: buildMainMenu() });
+    });
+
+    bot.command("alert", async (ctx) => {
+      const parts = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
+      if (parts.length < 2) {
+        await ctx.reply("🔔 Foydalanish: `/alert BTC 95000` yoki `/alert SOL 180.5`", {
+          parse_mode: "Markdown"
+        });
+        return;
+      }
+      const rawSym = parts[0];
+      const targetPrice = Number(parts[1]);
+      if (!Number.isFinite(targetPrice) || targetPrice <= 0) {
+        await ctx.reply("❌ Maqsadli narx musbat son bo'lishi kerak. Masalan: `/alert SOL 180`", {
+          parse_mode: "Markdown"
+        });
+        return;
+      }
+      try {
+        const cleanSym = rawSym.toUpperCase().replace("/USDT", "");
+        const fullSym = cleanSym.endsWith("USDT") ? cleanSym : `${cleanSym}USDT`;
+        const currentPrice = await fetchMexcTickerPrice(fullSym);
+        const res = addPriceAlert(fullSym, targetPrice, currentPrice);
+        if (!res.ok || !res.alert) {
+          await ctx.reply(`❌ ${res.error || "Narx eslatmasini qo'shib bo'lmadi."}`);
+          return;
+        }
+        pushActivityLog(
+          "ALERT",
+          "INFO",
+          `Yangi narx eslatma: ${res.alert.symbol} ${res.alert.direction} ${res.alert.targetPrice}`
+        );
+        const dirUz = res.alert.direction === "ABOVE" ? "yuqoriga o'tganda 📈" : "pastga tushganda 📉";
+        await ctx.reply(
+          `🔔 *Narx eslatmasi saqlandi!*\n\n🪙 Juftlik: \`${res.alert.symbol}\`\n🎯 Maqsad: \`${res.alert.targetPrice}\` (${dirUz})\n💰 Hozirgi narx: \`${currentPrice}\`\n\nBarcha eslatmalar: \`/alerts\``,
+          { parse_mode: "Markdown" }
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Koin narxi olinmadi";
+        await ctx.reply(`❌ Eslatma qo'shishda xatolik: ${msg}`);
+      }
+    });
+
+    bot.command("alerts", async (ctx) => {
+      const items = listPriceAlerts();
+      if (items.length === 0) {
+        await ctx.reply(
+          "🔔 *Faol narx eslatmalari yo'q.*\n\nYangi qo'shish: `/alert BTC 95000`",
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+      const kb = new InlineKeyboard();
+      const lines = [`🔔 *Faol Shaxsiy Narx Eslatmalari (${items.length} ta)*`, ``];
+      for (const a of items.slice(0, 10)) {
+        const arrow = a.direction === "ABOVE" ? "📈 >=" : "📉 <=";
+        lines.push(`• \`${a.symbol}\` ${arrow} \`${a.targetPrice}\``);
+        kb.text(`🗑️ ${a.symbol} (${a.targetPrice})`, `del_alert:${a.id}`).row();
+      }
+      await ctx.reply(lines.join("\n"), { parse_mode: "Markdown", reply_markup: kb });
+    });
+
+    bot.callbackQuery(/^del_alert:(.+)$/, async (ctx) => {
+      const id = ctx.match[1];
+      const removed = removePriceAlert(id);
+      await ctx.answerCallbackQuery(removed ? "Eslatma o'chirildi" : "Topilmadi");
+      if (removed) {
+        await ctx.reply("🗑️ Narx eslatmasi o'chirildi.");
+      }
+    });
+
+    bot.command("calc", async (ctx) => {
+      const parts = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
+      if (parts.length < 4) {
+        await ctx.reply(
+          "🧮 Foydalanish: `/calc <DEPOSIT> <RISK_PCT> <ENTRY> <SL>`\nMasalan: `/calc 500 2 100 96`",
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+      const [deposit, riskPct, entry, sl] = parts.map(Number);
+      if (
+        !Number.isFinite(deposit) ||
+        !Number.isFinite(riskPct) ||
+        !Number.isFinite(entry) ||
+        !Number.isFinite(sl) ||
+        deposit <= 0 ||
+        riskPct <= 0 ||
+        entry <= 0 ||
+        sl <= 0 ||
+        entry === sl
+      ) {
+        await ctx.reply("❌ Barcha qiymatlar musbat son bo'lishi va Entry ≠ SL bo'lishi kerak.");
+        return;
+      }
+      const calc = calculatePositionRisk(deposit, riskPct, entry, sl);
+      await ctx.reply(
+        [
+          `🧮 *POZITSIYA VA RISK KALKULYATORI*`,
+          ``,
+          `💰 *Depozit:* $${calc.depositUsd} | *Risk:* ${calc.riskPct}%`,
+          `🎯 *Entry:* \`${entry}\` | 🛑 *SL:* \`${sl}\` (Masofa: *${calc.stopDistPct}%*)`,
+          `🛡️ *Maksimal ruxsat etilgan zarar:* *$${calc.maxLossUsd}*`,
+          `📦 *Tavsiya etilgan pozitsiya hajmi:* *$${calc.positionSizeUsd}*`,
+          `🪙 *Koin miqdori:* \`${calc.coinQty}\``
+        ].join("\n"),
+        { parse_mode: "Markdown" }
       );
     });
 
@@ -358,9 +481,13 @@ export function startTelegramBot(): void {
         if (sameChat && res.sentText && res.sentPdf) {
           return;
         }
+        const report24h = get24hSignalReport();
         const summary = getDemoPortfolioSummary();
         const buf = await generatePortfolioPdfBuffer(summary);
-        await ctx.reply(formatStatsText(), { parse_mode: "Markdown", reply_markup: buildMainMenu() });
+        await ctx.reply(report24h.formattedTelegramText, {
+          parse_mode: "Markdown",
+          reply_markup: buildMainMenu()
+        });
         await ctx.replyWithDocument(new InputFile(buf, "cryptoquant-summary.pdf"), {
           caption: `📄 CryptoQuant-Copilot Kunlik Xulosa | Balans: $${summary.currentBalanceUsd.toFixed(2)} | Win Rate: ${summary.winRatePct}%`
         });
@@ -629,6 +756,31 @@ export function startTelegramBot(): void {
     bot.catch((err) => {
       console.error("[Telegram Bot] Runtime error:", err.message);
     });
+
+    const appUrl = getPublicAppUrl();
+    bot.api
+      .setChatMenuButton({
+        menu_button: {
+          type: "web_app",
+          text: "🖥️ Dashboard",
+          web_app: { url: appUrl }
+        }
+      })
+      .catch(() => {});
+
+    bot.api
+      .setMyCommands([
+        { command: "start", description: "Bosh menyu va Dashboard" },
+        { command: "scan", description: "5-agent jonli skanerlash" },
+        { command: "positions", description: "Ochiq demo savdolarim" },
+        { command: "mode", description: "Rejim tanlash (Hybrid/Intraday/Swing)" },
+        { command: "news", description: "USD Macro News Shield holati" },
+        { command: "summary", description: "24 soatlik signal hisoboti" },
+        { command: "pdf", description: "PDF demo portfel hisoboti" },
+        { command: "alert", description: "Shaxsiy narx eslatma (/alert BTC 95000)" },
+        { command: "calc", description: "Pozitsiya & risk kalkulyatori" }
+      ])
+      .catch(() => {});
 
     botInstance = bot;
     botRunning = true;

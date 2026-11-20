@@ -30,8 +30,8 @@ export function runCriticRiskAgent(
   const rejectReasons: string[] = [];
   const softWarnings: string[] = [];
 
-  // === 4 HARD REJECT RULES ONLY ===
-  // 1) Direction / Risk-Reward gate
+  // === 5 HARD REJECT RULES ONLY ===
+  // (a) Risk/Reward gate (< 2.0) or non-LONG technical setup
   if (tech.direction !== "LONG") {
     rejectReasons.push("Technician Agent LONG yo'nalishini tasdiqlamadi");
   }
@@ -39,23 +39,30 @@ export function runCriticRiskAgent(
     rejectReasons.push(`Risk/Foyda nisbati past (1:${tech.riskRewardRatio} < 1:2.0)`);
   }
 
-  // 2) MEXC ST / Delist / Active Exploit Fundamental Shield hard block
+  // (b) MEXC ST / Delist / Active Exploit Fundamental Shield hard block
   if (fundamental?.hardBlockReason) {
     rejectReasons.push(`Fundamental Shield blokladi: ${fundamental.hardBlockReason}`);
   }
 
-  // 3) Active High-Impact USD Macro News Shield
+  // (c) Active High-Impact USD Macro News Shield
   const newsShield = getActiveNewsShield();
   if (newsShield.active) {
     rejectReasons.push(newsShield.reason || "Faol USD Macro News Shield — kirish to'xtatildi");
   }
 
-  // 4) Both 1H and 4H trends BEARISH
+  // (d) Both 1H and 4H trends BEARISH
   if (macro.trend1h === "BEARISH" && macro.trend4h === "BEARISH") {
     rejectReasons.push("1H va 4H trendlarning ikkalasi ham BEARISH");
   }
 
-  // === SOFT WARNINGS ONLY (adjust Star Rating, never hard-reject) ===
+  // (e) Late parabolic FOMO chase (24h > +28% AND RSI > 72)
+  if (scout.priceChange24hPct > 28 && tech.rsi14 > 72) {
+    rejectReasons.push(
+      `Kechki parabolik FOMO quvish (24s +${scout.priceChange24hPct}%, RSI ${tech.rsi14})`
+    );
+  }
+
+  // === SOFT WARNINGS ONLY (adjust 1–5 Star Rating ⭐, never hard-reject) ===
   let starPenalty = 0;
 
   if (fundamental) {
@@ -70,8 +77,22 @@ export function runCriticRiskAgent(
     starPenalty += 1;
   }
 
-  if (tech.rsi14 > 76) {
-    softWarnings.push(`RSI yuqori (${tech.rsi14}) — qisqa muddatli qizib ketish`);
+  if (tech.rsi14 > 72 && !(scout.priceChange24hPct > 28)) {
+    softWarnings.push(`RSI qizigan (${tech.rsi14}) — pullback kutish foydali`);
+    starPenalty += 1;
+  }
+
+  const stretchAboveEma21Pct =
+    tech.ema21 > 0 ? ((tech.entryPrice - tech.ema21) / tech.ema21) * 100 : 0;
+  if (stretchAboveEma21Pct > 3.0) {
+    softWarnings.push(
+      `Narx EMA21 dan +${stretchAboveEma21Pct.toFixed(1)}% cho'zilgan — limit kirish ma'qul`
+    );
+    starPenalty += 1;
+  }
+
+  if (scout.priceChange24hPct > 22 && !(scout.priceChange24hPct > 28 && tech.rsi14 > 72)) {
+    softWarnings.push(`24s o'sish yuqori (+${scout.priceChange24hPct}%) — ehtiyotkor pozitsiya`);
     starPenalty += 1;
   }
 
@@ -86,24 +107,20 @@ export function runCriticRiskAgent(
     Math.min(
       100,
       Math.round(
-        scout.scoutScore * 0.2 +
+        scout.scoutScore * 0.22 +
           tech.techScore * 0.42 +
-          macro.macroScore * 0.28 +
+          macro.macroScore * 0.26 +
           fundamentalBoost -
           Math.min(starPenalty * 2, 8)
       )
     )
   );
 
-  if (confidenceScore < 55) {
-    rejectReasons.push(`Umumiy ishonch balli past (${confidenceScore}/100 < 55)`);
-  }
-
-  // Compute 1-5 Star Rating
+  // Compute 1–5 Star Rating (⭐)
   let baseStars = 3;
-  if (confidenceScore >= 80) baseStars = 5;
-  else if (confidenceScore >= 68) baseStars = 4;
-  else if (confidenceScore < 55) baseStars = 2;
+  if (confidenceScore >= 78) baseStars = 5;
+  else if (confidenceScore >= 66) baseStars = 4;
+  else if (confidenceScore < 52) baseStars = 2;
 
   if (macro.trend1h === "BULLISH" && macro.trend4h === "BULLISH") {
     baseStars = Math.min(5, baseStars + 1);
@@ -111,7 +128,7 @@ export function runCriticRiskAgent(
   const starCount = Math.max(1, Math.min(5, baseStars - Math.min(starPenalty, 2)));
   const longTermStars: StarRatingInfo = {
     count: starCount,
-    label: `${"★".repeat(starCount)}${"☆".repeat(5 - starCount)} (${starCount}/5)`
+    label: `${"⭐".repeat(starCount)}${"☆".repeat(5 - starCount)} (${starCount}/5)`
   };
 
   // Hybrid Trade Mode classification
