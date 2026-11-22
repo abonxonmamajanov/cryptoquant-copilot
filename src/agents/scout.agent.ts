@@ -8,13 +8,15 @@ import {
 const STABLECOIN_BASES = new Set([
   "USDT", "USDC", "FDUSD", "TUSD", "DAI", "USDD", "USDP", "BUSD",
   "PYUSD", "USDE", "EUR", "EURC", "AEUR", "USD1", "RLUSD", "GUSD",
-  "FRAX", "LUSD", "CRVUSD", "USTC", "EURT", "XAUT", "PAXG"
+  "FRAX", "LUSD", "CRVUSD", "USTC", "EURT", "XAUT", "PAXG", "USAT",
+  "GOLD", "SILVER", "OIL"
 ]);
 
 const LEVERAGED_SUFFIXES = ["3L", "3S", "5L", "5S", "2L", "2S", "UP", "DOWN", "BULL", "BEAR"];
+const BLOCKED_BASE_SUBSTRINGS = ["GOLD", "PAXG", "XAUT", "USOON"];
 
-const MIN_QUOTE_VOLUME_24H = 2_000_000; // $2M minimum strong 24h liquidity
-const MAX_CANDIDATES_TO_DEEP_SCAN = 15;
+const MIN_QUOTE_VOLUME_24H = 3_000_000; // $3M minimum strong 24h liquidity (avoids thin whipsaw traps)
+const MAX_CANDIDATES_TO_DEEP_SCAN = 20;
 const COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes per symbol
 
 const alertCooldownMap = new Map<string, number>();
@@ -47,9 +49,15 @@ export interface ScoutScanSnapshot {
 }
 
 export function isFilteredOutSymbol(symbol: string): boolean {
-  if (!symbol.endsWith("USDT")) return true;
-  const base = symbol.slice(0, -4);
-  if (!base || STABLECOIN_BASES.has(base)) return true;
+  const upper = String(symbol || "").toUpperCase().trim();
+  if (!upper.endsWith("USDT")) return true;
+  const base = upper.slice(0, -4);
+  // Strictly allow clean ASCII alphanumeric crypto tickers only (blocks GOLD(PAXG), OIL(USOON), non-ASCII memes)
+  if (!base || !/^[A-Z0-9]{2,15}$/.test(base)) return true;
+  if (STABLECOIN_BASES.has(base)) return true;
+  for (const blocked of BLOCKED_BASE_SUBSTRINGS) {
+    if (base.includes(blocked)) return true;
+  }
   for (const suffix of LEVERAGED_SUFFIXES) {
     if (base.length > suffix.length + 1 && base.endsWith(suffix)) {
       return true;
@@ -67,22 +75,22 @@ function computePreRankScore(ticker: MexcTicker24h): number {
   const liqWeight = Math.log10(Math.max(ticker.quoteVolume, 10));
   let moveScore = 0;
 
-  if (chg >= 1.5 && chg <= 14) {
-    // Sweet spot: early accumulation & fresh breakout
-    moveScore = 18 + (12 - Math.abs(chg - 6.5));
-  } else if (chg >= 0 && chg < 1.5) {
-    // Pre-breakout quiet accumulation
-    moveScore = 10 + chg * 4;
-  } else if (chg > 14 && chg <= 22) {
-    // Mid-trend continuation
-    moveScore = 10;
-  } else if (chg > 22) {
+  if (chg >= 0.5 && chg <= 12) {
+    // Sweet spot: constructive uptrend / pullback-ready zone (not overextended)
+    moveScore = 20 + (10 - Math.abs(chg - 4.5));
+  } else if (chg >= -2 && chg < 0.5) {
+    // Quiet accumulation / early base reclaim
+    moveScore = 12 + (chg + 2) * 2.5;
+  } else if (chg > 12 && chg <= 18) {
+    // Mid-trend continuation (more cautious)
+    moveScore = 9;
+  } else if (chg > 18) {
     // Penalize late overextended FOMO pumps
-    moveScore = Math.max(0.5, 5 - (chg - 22) * 0.35);
-  } else if (chg >= -5) {
-    moveScore = 5;
+    moveScore = Math.max(0.5, 4 - (chg - 18) * 0.35);
+  } else if (chg >= -6) {
+    moveScore = 4;
   } else {
-    moveScore = 1;
+    moveScore = 0.5;
   }
 
   return moveScore * liqWeight;
@@ -124,7 +132,7 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
     eligible.push(t);
   }
 
-  // Pre-rank favoring early accumulation & fresh breakouts (+1.5%..+14%) with >= $2M liquidity
+  // Pre-rank favoring liquid constructive uptrends & pullback-ready pairs (+0.5%..+12%) with >= $3M liquidity
   const preRanked = [...eligible]
     .sort((a, b) => computePreRankScore(b) - computePreRankScore(a))
     .slice(0, MAX_CANDIDATES_TO_DEEP_SCAN);
@@ -151,71 +159,81 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
 
       const priceChange24hPct = Number(ticker.priceChangePercent.toFixed(2));
 
-      // Compute Stage 5.7 Early-Breakout Scout Score (0-100)
+      // Stage 5.9 Quant Discipline Scout Score (0-100): reward liquid controlled trends, penalize blow-off spikes
       let volPoints = 0;
-      if (volumeSpikeRatio15m >= 1.6 && volumeSpikeRatio15m <= 5.0) {
-        volPoints = clamp(24 + (volumeSpikeRatio15m - 1.6) * 5.2, 24, 42);
-      } else if (volumeSpikeRatio15m > 5.0) {
-        volPoints = clamp(34 - (volumeSpikeRatio15m - 5.0) * 1.8, 16, 34);
+      if (volumeSpikeRatio15m >= 1.1 && volumeSpikeRatio15m <= 3.5) {
+        volPoints = clamp(24 + (volumeSpikeRatio15m - 1.1) * 5.5, 24, 36);
+      } else if (volumeSpikeRatio15m > 3.5 && volumeSpikeRatio15m <= 5.5) {
+        volPoints = 22;
+      } else if (volumeSpikeRatio15m > 5.5) {
+        // Blow-off volume spike often precedes exhaustion pullback
+        volPoints = clamp(16 - (volumeSpikeRatio15m - 5.5) * 2.0, 4, 16);
       } else {
-        volPoints = clamp((volumeSpikeRatio15m - 1) * 28, 0, 20);
+        volPoints = clamp(volumeSpikeRatio15m * 18, 6, 20);
       }
 
       let breakoutPoints = 0;
-      if (priceChange24hPct >= 1.5 && priceChange24hPct <= 14) {
-        breakoutPoints = 24;
-      } else if (priceChange24hPct >= 0 && priceChange24hPct < 1.5) {
-        breakoutPoints = 14;
-      } else if (priceChange24hPct > 14 && priceChange24hPct <= 22) {
+      if (priceChange24hPct >= 0.5 && priceChange24hPct <= 12) {
+        breakoutPoints = 26;
+      } else if (priceChange24hPct >= -2 && priceChange24hPct < 0.5) {
+        breakoutPoints = 16;
+      } else if (priceChange24hPct > 12 && priceChange24hPct <= 18) {
         breakoutPoints = 8;
-      } else if (priceChange24hPct > 22) {
+      } else if (priceChange24hPct > 18) {
         // Penalize late overextended FOMO pumps
-        breakoutPoints = -18 - Math.min(16, (priceChange24hPct - 22) * 0.8);
+        breakoutPoints = -20 - Math.min(18, (priceChange24hPct - 18) * 0.9);
       } else {
-        breakoutPoints = 3;
+        breakoutPoints = 2;
       }
 
       let momPoints = 0;
-      if (momentum15mPct >= 0.3 && momentum15mPct <= 3.5) {
-        momPoints = clamp(8 + momentum15mPct * 4.2, 8, 18);
-      } else if (momentum15mPct > 3.5) {
-        momPoints = 9;
+      if (momentum15mPct >= 0.1 && momentum15mPct <= 1.8) {
+        // Controlled green reclaim candle (not a vertical blow-off spike)
+        momPoints = clamp(12 + momentum15mPct * 4.5, 12, 20);
+      } else if (momentum15mPct > 1.8 && momentum15mPct <= 3.2) {
+        momPoints = 10;
+      } else if (momentum15mPct > 3.2) {
+        // Late vertical candle — likely to mean-revert
+        momPoints = 2;
+      } else if (momentum15mPct >= -0.8) {
+        momPoints = 6;
       } else {
-        momPoints = clamp(Math.abs(momentum15mPct) * 2.5, 0, 6);
+        momPoints = 0;
       }
 
       const liqPoints =
         ticker.quoteVolume >= MIN_QUOTE_VOLUME_24H
-          ? clamp(8 + (Math.log10(ticker.quoteVolume) - 6.3) * 6.5, 8, 16)
+          ? clamp(10 + (Math.log10(ticker.quoteVolume) - 6.47) * 5.5, 10, 18)
           : 0;
 
       const scoutScore = Math.round(clamp(volPoints + breakoutPoints + momPoints + liqPoints, 0, 100));
 
       const reasons: string[] = [];
-      if (priceChange24hPct >= 1.5 && priceChange24hPct <= 14) {
-        reasons.push(`Erta breakout zonasi (+${priceChange24hPct}%)`);
-      } else if (priceChange24hPct > 22) {
+      if (priceChange24hPct >= 0.5 && priceChange24hPct <= 12) {
+        reasons.push(`Sog'lom trend zonasi (+${priceChange24hPct}%)`);
+      } else if (priceChange24hPct > 18) {
         reasons.push(`Kechki FOMO o'sishi (+${priceChange24hPct}%)`);
       }
-      if (volumeSpikeRatio15m >= 1.6 && volumeSpikeRatio15m <= 5.0) {
-        reasons.push(`Yangi 15m hajm kengayishi ${volumeSpikeRatio15m}x`);
-      } else if (volumeSpikeRatio15m > 5.0) {
-        reasons.push(`Kuchli 15m hajm sakrashi ${volumeSpikeRatio15m}x`);
+      if (volumeSpikeRatio15m >= 1.1 && volumeSpikeRatio15m <= 3.5) {
+        reasons.push(`Barqaror 15m hajm ${volumeSpikeRatio15m}x`);
+      } else if (volumeSpikeRatio15m > 5.5) {
+        reasons.push(`Haddan tashqari hajm sakrashi ${volumeSpikeRatio15m}x (ehtiyot)`);
       }
-      if (momentum15mPct >= 0.5) {
-        reasons.push(`15m impuls +${momentum15mPct}%`);
+      if (momentum15mPct >= 0.1 && momentum15mPct <= 1.8) {
+        reasons.push(`15m nazoratli impuls +${momentum15mPct}%`);
       }
       if (ticker.quoteVolume >= MIN_QUOTE_VOLUME_24H) {
         reasons.push(`Kuchli likvidlik ($${(ticker.quoteVolume / 1_000_000).toFixed(1)}M)`);
       }
       if (reasons.length === 0) reasons.push("Yuqori likvidli faol juftlik");
 
-      const isEarlyBreakout =
-        priceChange24hPct >= 1.5 && priceChange24hPct <= 14 && volumeSpikeRatio15m >= 1.6;
-      const isAnomaly =
-        isEarlyBreakout ||
-        (volumeSpikeRatio15m >= 1.6 && priceChange24hPct <= 22) ||
-        scoutScore >= 60;
+      const isHealthySetup =
+        priceChange24hPct >= 0.5 &&
+        priceChange24hPct <= 12 &&
+        volumeSpikeRatio15m >= 1.1 &&
+        volumeSpikeRatio15m <= 5.0 &&
+        momentum15mPct > 0;
+      const isAnomaly = isHealthySetup || (scoutScore >= 64 && priceChange24hPct <= 18);
 
       let isNewAlert = false;
       if (isAnomaly) {

@@ -71,20 +71,33 @@ async function fetchWithMirrorFallback<T>(path: string, timeoutMs = 10000): Prom
   throw new Error(`MEXC request failed for ${path}: ${msg}`);
 }
 
+function normalizeMexcPriceChangePct(rawPct: unknown, lastPrice: number, openPrice: unknown): number {
+  const open = Number(openPrice || 0);
+  if (Number.isFinite(open) && open > 0 && Number.isFinite(lastPrice) && lastPrice > 0) {
+    return Number((((lastPrice - open) / open) * 100).toFixed(4));
+  }
+  const n = Number(rawPct || 0);
+  if (!Number.isFinite(n)) return 0;
+  // MEXC /api/v3/ticker/24hr returns decimal ratio (e.g. 0.05 = +5%, 2.254 = +225.4%)
+  return Number((n * 100).toFixed(4));
+}
+
 export async function fetchMexcTickers24h(): Promise<MexcTicker24h[]> {
   const raw = await fetchWithMirrorFallback<Array<Record<string, string>>>("/api/v3/ticker/24hr", 15000);
 
   return raw
-    .map((item) => ({
-      symbol: String(item.symbol || ""),
-      lastPrice: Number(item.lastPrice || 0),
-      priceChangePercent:
-        Number(item.priceChangePercent || 0) * (Math.abs(Number(item.priceChangePercent || 0)) < 1 ? 100 : 1),
-      quoteVolume: Number(item.quoteVolume || 0),
-      volume: Number(item.volume || 0),
-      highPrice: Number(item.highPrice || 0),
-      lowPrice: Number(item.lowPrice || 0)
-    }))
+    .map((item) => {
+      const lastPrice = Number(item.lastPrice || 0);
+      return {
+        symbol: String(item.symbol || ""),
+        lastPrice,
+        priceChangePercent: normalizeMexcPriceChangePct(item.priceChangePercent, lastPrice, item.openPrice),
+        quoteVolume: Number(item.quoteVolume || 0),
+        volume: Number(item.volume || 0),
+        highPrice: Number(item.highPrice || 0),
+        lowPrice: Number(item.lowPrice || 0)
+      };
+    })
     .filter((t) => t.symbol.length > 0 && Number.isFinite(t.lastPrice) && t.lastPrice > 0);
 }
 
@@ -97,11 +110,10 @@ export async function fetchMexcTicker24h(symbol: string): Promise<MexcTicker24h>
   if (!item.symbol || !Number.isFinite(lastPrice) || lastPrice <= 0) {
     throw new Error(`Ticker not found on MEXC Spot: ${symbol}`);
   }
-  const rawPct = Number(item.priceChangePercent || 0);
   return {
     symbol: String(item.symbol),
     lastPrice,
-    priceChangePercent: rawPct * (Math.abs(rawPct) < 1 ? 100 : 1),
+    priceChangePercent: normalizeMexcPriceChangePct(item.priceChangePercent, lastPrice, item.openPrice),
     quoteVolume: Number(item.quoteVolume || 0),
     volume: Number(item.volume || 0),
     highPrice: Number(item.highPrice || 0),

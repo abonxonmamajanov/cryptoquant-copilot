@@ -10,7 +10,11 @@ import {
   runExecutiveAgent,
   sendTelegramTextMessage
 } from "../agents/executive.agent";
-import { canDispatchSignal, markSignalDispatched } from "./cooldown.service";
+import {
+  getDispatchGuardStatus,
+  markSignalDispatched,
+  recordSymbolStopLoss
+} from "./cooldown.service";
 import {
   DemoPortfolioSummary,
   DemoTradeItem,
@@ -21,7 +25,9 @@ import { FundamentalReport, runFundamentalShield } from "./fundamental.service";
 import { getActiveSignalMode, SignalMode } from "./subscription.service";
 import {
   evaluateTrackedSignals,
+  getAtRiskActiveCount,
   getSignalTrackerSummary,
+  hasActiveSignal,
   registerDispatchedSignal,
   SignalMilestoneAlert
 } from "./signalTracker.service";
@@ -54,7 +60,9 @@ export interface PipelineRunSnapshot {
   records: EvaluatedSignalRecord[];
 }
 
-const MAX_SYMBOLS_TO_EVALUATE = 5;
+const MAX_SYMBOLS_TO_EVALUATE = 8;
+const MAX_AT_RISK_ACTIVE_SIGNALS = 4; // Cap correlated open signals not yet at Breakeven
+const MAX_TOTAL_ACTIVE_SIGNALS = 6;
 let latestPipelineSnapshot: PipelineRunSnapshot | null = null;
 
 export function getLatestPipelineSnapshot(): PipelineRunSnapshot | null {
@@ -96,7 +104,7 @@ export async function runFiveAgentPipeline(): Promise<{
     await sendTelegramTextMessage(formatTradeClosedCard(closedTrade)).catch(() => {});
   }
 
-  // 1b. Evaluate ALL dispatched auto-signals in Signal Tracker (Reply to original signal!)
+  // 1b. Evaluate ALL dispatched auto-signals in Signal Tracker (Reply to original signal + feed SL Circuit Breaker)
   const signalAlertsThisRun = evaluateTrackedSignals(priceMap);
   for (const alert of signalAlertsThisRun) {
     const lvl = alert.eventType === "SL_HIT" ? "WARN" : "SUCCESS";
@@ -105,6 +113,12 @@ export async function runFiveAgentPipeline(): Promise<{
       lvl,
       `${alert.signal.symbol} → ${alert.eventType} (${alert.pnlPct >= 0 ? "+" : ""}${alert.pnlPct}%) @ ${alert.livePrice}`
     );
+    if (alert.eventType === "SL_HIT") {
+      const cb = recordSymbolStopLoss(alert.signal.symbol);
+      if (cb.active && cb.reason) {
+        pushActivityLog("CRITIC", "ALERT", cb.reason);
+      }
+    }
     await sendTelegramTextMessage(alert.telegramText, alert.replyToMessageId).catch(() => {});
   }
 
@@ -124,7 +138,7 @@ export async function runFiveAgentPipeline(): Promise<{
   pushActivityLog(
     "SCOUT",
     "INFO",
-    `Skanerlash tugadi: ${scoutSnapshot.liquidEligibleCount} ta likvid juftlik (>=$2M), ${scoutSnapshot.anomaliesDetected} ta erta anomaliya (${scoutSnapshot.durationMs}ms)`
+    `Skanerlash tugadi: ${scoutSnapshot.liquidEligibleCount} ta likvid juftlik (>=$3M), ${scoutSnapshot.anomaliesDetected} ta sog'lom nomzod (${scoutSnapshot.durationMs}ms)`
   );
 
   const topCandidates = scoutSnapshot.candidates.slice(0, MAX_SYMBOLS_TO_EVALUATE);
@@ -142,12 +156,12 @@ export async function runFiveAgentPipeline(): Promise<{
     pushActivityLog(
       "TECHNICIAN",
       "INFO",
-      `${candidate.symbol}: RSI ${technician.rsi14}, R:R 1:${technician.riskRewardRatio}, rejim ${technician.tradeMode ?? "INTRADAY"}`
+      `${candidate.symbol}: RSI ${technician.rsi14}, R:R 1:${technician.riskRewardRatio}, rejim ${technician.tradeMode ?? "INTRADAY"}${technician.isPullbackReclaim ? " [Pullback-Reclaim]" : ""}`
     );
     pushActivityLog(
       "MACRO",
       macroFlow.regime === "BEARISH" ? "WARN" : "INFO",
-      `${candidate.symbol}: 1H/4H ${macroFlow.trend1h}/${macroFlow.trend4h}, Bid/Ask ${macroFlow.bidAskRatio}x (${(macroFlow.exchanges ?? ["MEXC"]).join("+")})`
+      `${candidate.symbol}: 1H/4H ${macroFlow.trend1h}/${macroFlow.trend4h}, BTC ${macroFlow.btcChange1hPct >= 0 ? "+" : ""}${macroFlow.btcChange1hPct}% (${macroFlow.btcTrend1h ?? "—"}/${macroFlow.btcTrend4h ?? "—"}), Bid/Ask ${macroFlow.bidAskRatio}x`
     );
 
     const criticRisk = runCriticRiskAgent(candidate, technician, macroFlow, fundamental);
@@ -171,10 +185,21 @@ export async function runFiveAgentPipeline(): Promise<{
       const tradeMode = criticRisk.tradeMode ?? technician.tradeMode ?? "INTRADAY";
       const modeAllowed =
         activeSignalMode === "HYBRID" || activeSignalMode === tradeMode;
+      const trackerNow = getSignalTrackerSummary();
+      const atRiskCount = getAtRiskActiveCount();
+      const guard = getDispatchGuardStatus(candidate.symbol);
 
       if (!modeAllowed) {
         criticRisk.reasons.push(`Faol rejim ${activeSignalMode} — ${tradeMode} signali o'tkazib yuborildi`);
-      } else if (canDispatchSignal(candidate.symbol)) {
+      } else if (hasActiveSignal(candidate.symbol)) {
+        criticRisk.reasons.push("Ushbu juftlikda faol signal allaqachon ochiq — dublikat bloklandi");
+      } else if (atRiskCount >= MAX_AT_RISK_ACTIVE_SIGNALS || trackerNow.activeCount >= MAX_TOTAL_ACTIVE_SIGNALS) {
+        criticRisk.reasons.push(
+          `Portfel risk limiti to'lgan (${atRiskCount}/${MAX_AT_RISK_ACTIVE_SIGNALS} risk ostida, ${trackerNow.activeCount}/${MAX_TOTAL_ACTIVE_SIGNALS} jami faol)`
+        );
+      } else if (!guard.allowed) {
+        criticRisk.reasons.push(guard.reason || "Cooldown / Circuit Breaker faol — yuborilmadi");
+      } else {
         executive = await runExecutiveAgent(
           candidate,
           technician,
@@ -189,10 +214,8 @@ export async function runFiveAgentPipeline(): Promise<{
         pushActivityLog(
           "EXECUTIVE",
           "SUCCESS",
-          `Signal yuborildi: ${candidate.symbol} (${tradeMode}) | Entry ${technician.entryPrice} | msgId=${executive.telegramMessageId ?? "DRY"}`
+          `Signal yuborildi: ${candidate.symbol} (${tradeMode}) | Entry ${technician.entryPrice} | SL ${technician.stopLossPrice} | msgId=${executive.telegramMessageId ?? "DRY"}`
         );
-      } else {
-        criticRisk.reasons.push("Cooldown faol — qayta yuborilmadi");
       }
     }
 

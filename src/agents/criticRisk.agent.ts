@@ -30,39 +30,78 @@ export function runCriticRiskAgent(
   const rejectReasons: string[] = [];
   const softWarnings: string[] = [];
 
-  // === 5 HARD REJECT RULES ONLY ===
-  // (a) Risk/Reward gate (< 2.0) or non-LONG technical setup
+  // === STAGE 5.9 INSTITUTIONAL QUANT HARD-REJECT GATES ===
+  // (1) Technical direction & Risk/Reward gate
   if (tech.direction !== "LONG") {
-    rejectReasons.push("Technician Agent LONG yo'nalishini tasdiqlamadi");
+    rejectReasons.push("Technician Agent LONG tuzilmasini (EMA9>21>50) tasdiqlamadi");
   }
   if (tech.riskRewardRatio < 2.0) {
     rejectReasons.push(`Risk/Foyda nisbati past (1:${tech.riskRewardRatio} < 1:2.0)`);
   }
 
-  // (b) MEXC ST / Delist / Active Exploit Fundamental Shield hard block
+  // (2) MEXC ST / Delist / Spot Halted Fundamental Shield
   if (fundamental?.hardBlockReason) {
     rejectReasons.push(`Fundamental Shield blokladi: ${fundamental.hardBlockReason}`);
   }
 
-  // (c) Active High-Impact USD Macro News Shield
+  // (3) Active High-Impact USD Macro News Shield
   const newsShield = getActiveNewsShield();
   if (newsShield.active) {
     rejectReasons.push(newsShield.reason || "Faol USD Macro News Shield — kirish to'xtatildi");
   }
 
-  // (d) Both 1H and 4H trends BEARISH
-  if (macro.trend1h === "BEARISH" && macro.trend4h === "BEARISH") {
-    rejectReasons.push("1H va 4H trendlarning ikkalasi ham BEARISH");
-  }
-
-  // (e) Late parabolic FOMO chase (24h > +28% AND RSI > 72)
-  if (scout.priceChange24hPct > 28 && tech.rsi14 > 72) {
+  // (4) Strict Higher-Timeframe Alignment (block ANY bearish 1H or 4H to prevent dead-cat bounces)
+  if (macro.trend1h === "BEARISH" || macro.trend4h === "BEARISH") {
     rejectReasons.push(
-      `Kechki parabolik FOMO quvish (24s +${scout.priceChange24hPct}%, RSI ${tech.rsi14})`
+      `Katta timeframe qarshi (1H: ${macro.trend1h ?? "—"}, 4H: ${macro.trend4h ?? "—"}) — pasayuvchi trendda LONG taqiqlangan`
     );
   }
 
-  // === SOFT WARNINGS ONLY (adjust 1–5 Star Rating ⭐, never hard-reject) ===
+  // (5) BTC Macro Regime Shield (block correlated dumps & dual-TF BTC bear trend)
+  if (macro.btcChange1hPct <= -0.6) {
+    rejectReasons.push(`BTC 1s bosim ostida (${macro.btcChange1hPct}% <= -0.6%) — altcoin LONG to'xtatildi`);
+  }
+  if (macro.btcTrend1h === "BEARISH" && macro.btcTrend4h === "BEARISH") {
+    rejectReasons.push("BTC 1H va 4H trendlari ikkalasi ham BEARISH — makro himoya faol");
+  }
+
+  // (6) Anti-Chase & Pullback-Reclaim Discipline
+  const stretchAboveEma21Pct =
+    typeof tech.stretchAboveEma21Pct === "number"
+      ? tech.stretchAboveEma21Pct
+      : tech.ema21 > 0
+        ? Number((((tech.entryPrice - tech.ema21) / tech.ema21) * 100).toFixed(2))
+        : 0;
+
+  if (scout.priceChange24hPct > 20 || (scout.priceChange24hPct > 28 && tech.rsi14 > 72)) {
+    rejectReasons.push(
+      `Kechki FOMO quvish (24s +${scout.priceChange24hPct}%, RSI ${tech.rsi14}) — rad etildi`
+    );
+  }
+  if (tech.rsi14 > 66 || tech.rsi14 < 42) {
+    rejectReasons.push(`RSI optimal zonadan tashqarida (${tech.rsi14}, talab: 42–66)`);
+  }
+  if (stretchAboveEma21Pct > 2.5) {
+    rejectReasons.push(
+      `Narx EMA21 dan +${stretchAboveEma21Pct.toFixed(1)}% cho'zilgan (>2.5%) — pullback kutiladi`
+    );
+  }
+  if (tech.isPullbackReclaim === false) {
+    rejectReasons.push("EMA9/21 pullback-reclaim tasdig'i yo'q — yashil shamni quvish bloklandi");
+  }
+
+  // (7) Order-Book Seller Wall, Spread & Extreme Volatility Whipsaw Guard
+  if (macro.bidAskRatio < 0.7) {
+    rejectReasons.push(`Kuchli sotuv devori (Bid/Ask ${macro.bidAskRatio}x < 0.70x)`);
+  }
+  if (macro.spreadPct > 0.35) {
+    rejectReasons.push(`Order book spread juda keng (${macro.spreadPct}% > 0.35%)`);
+  }
+  if (typeof tech.atrPct === "number" && tech.atrPct > 3.2) {
+    rejectReasons.push(`Haddan tashqari 15m volatillik (ATR ${tech.atrPct}% > 3.2%) — whipsaw riski`);
+  }
+
+  // === SOFT WARNINGS (adjust 1–5 Star Rating ⭐) ===
   let starPenalty = 0;
 
   if (fundamental) {
@@ -77,27 +116,25 @@ export function runCriticRiskAgent(
     starPenalty += 1;
   }
 
-  if (tech.rsi14 > 72 && !(scout.priceChange24hPct > 28)) {
-    softWarnings.push(`RSI qizigan (${tech.rsi14}) — pullback kutish foydali`);
+  if (macro.btcTrend4h === "BEARISH") {
+    softWarnings.push("BTC 4H trendi BEARISH — kichikroq hajmda va qisqa INTRADAY intizomda ishlang");
     starPenalty += 1;
   }
 
-  const stretchAboveEma21Pct =
-    tech.ema21 > 0 ? ((tech.entryPrice - tech.ema21) / tech.ema21) * 100 : 0;
-  if (stretchAboveEma21Pct > 3.0) {
+  if (stretchAboveEma21Pct > 1.8 && stretchAboveEma21Pct <= 2.5) {
     softWarnings.push(
-      `Narx EMA21 dan +${stretchAboveEma21Pct.toFixed(1)}% cho'zilgan — limit kirish ma'qul`
+      `Narx EMA21 dan +${stretchAboveEma21Pct.toFixed(1)}% yuqorida — limit buyurtma ma'qul`
     );
     starPenalty += 1;
   }
 
-  if (scout.priceChange24hPct > 22 && !(scout.priceChange24hPct > 28 && tech.rsi14 > 72)) {
-    softWarnings.push(`24s o'sish yuqori (+${scout.priceChange24hPct}%) — ehtiyotkor pozitsiya`);
+  if (macro.bidAskRatio >= 0.7 && macro.bidAskRatio < 0.95) {
+    softWarnings.push(`Order book sotuv bosimi bor (${macro.bidAskRatio}x) — ehtiyotkor kirish`);
     starPenalty += 1;
   }
 
-  if (macro.spreadPct > 0.4) {
-    softWarnings.push(`Order book spread keng (${macro.spreadPct}%) — limit buyurtma tavsiya etiladi`);
+  if (macro.spreadPct > 0.2 && macro.spreadPct <= 0.35) {
+    softWarnings.push(`Spread biroz keng (${macro.spreadPct}%) — limit buyurtma tavsiya etiladi`);
     starPenalty += 1;
   }
 
@@ -107,8 +144,8 @@ export function runCriticRiskAgent(
     Math.min(
       100,
       Math.round(
-        scout.scoutScore * 0.22 +
-          tech.techScore * 0.42 +
+        scout.scoutScore * 0.2 +
+          tech.techScore * 0.44 +
           macro.macroScore * 0.26 +
           fundamentalBoost -
           Math.min(starPenalty * 2, 8)
@@ -116,11 +153,16 @@ export function runCriticRiskAgent(
     )
   );
 
+  // (8) Minimum Quality Confidence Gate
+  if (confidenceScore < 65) {
+    rejectReasons.push(`Umumiy ishonch balli past (${confidenceScore}/100 < 65)`);
+  }
+
   // Compute 1–5 Star Rating (⭐)
   let baseStars = 3;
   if (confidenceScore >= 78) baseStars = 5;
-  else if (confidenceScore >= 66) baseStars = 4;
-  else if (confidenceScore < 52) baseStars = 2;
+  else if (confidenceScore >= 68) baseStars = 4;
+  else if (confidenceScore < 55) baseStars = 2;
 
   if (macro.trend1h === "BULLISH" && macro.trend4h === "BULLISH") {
     baseStars = Math.min(5, baseStars + 1);
@@ -131,9 +173,13 @@ export function runCriticRiskAgent(
     label: `${"⭐".repeat(starCount)}${"☆".repeat(5 - starCount)} (${starCount}/5)`
   };
 
-  // Hybrid Trade Mode classification
+  // Hybrid Trade Mode classification: SWING requires non-bearish BTC 4H & coin above 4H EMA50
   const tradeMode: TradeMode =
-    macro.trend1h === "BULLISH" && macro.trend4h === "BULLISH" && longTermStars.count >= 4
+    macro.trend1h === "BULLISH" &&
+    macro.trend4h === "BULLISH" &&
+    macro.btcTrend4h !== "BEARISH" &&
+    macro.above4hEma50 !== false &&
+    longTermStars.count >= 4
       ? "SWING"
       : "INTRADAY";
 
@@ -142,8 +188,8 @@ export function runCriticRiskAgent(
     verdict === "APPROVE"
       ? [
           `R:R 1:${tech.riskRewardRatio} talabga mos (${tradeMode})`,
-          `Reyting: ${longTermStars.label} | RSI ${tech.rsi14}`,
-          `1H/4H: ${macro.trend1h ?? macro.regime}/${macro.trend4h ?? macro.regime}`
+          `Reyting: ${longTermStars.label} | RSI ${tech.rsi14}${tech.isPullbackReclaim ? " | Pullback-Reclaim ✅" : ""}`,
+          `1H/4H: ${macro.trend1h ?? macro.regime}/${macro.trend4h ?? macro.regime} | BTC: ${macro.btcChange1hPct >= 0 ? "+" : ""}${macro.btcChange1hPct}%`
         ]
       : rejectReasons;
 

@@ -89,13 +89,26 @@ app.get("/ping", (_req, res) => {
 
 app.get("/health", (_req, res) => {
   const portfolio = getDemoPortfolioSummary();
+  const tracker = getSignalTrackerSummary();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-5.8-security-hardened",
+    stage: "stage-5.9-quant-alpha-shield",
     status: "ok",
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),
     scheduler: getSchedulerStats(),
+    signalTracker: {
+      activeCount: tracker.activeCount,
+      atRiskActiveCount: tracker.atRiskActiveCount,
+      closedCount: tracker.closedCount,
+      tpCount: tracker.tpCount,
+      beCount: tracker.beCount,
+      slCount: tracker.slCount,
+      accuracyPct: tracker.accuracyPct,
+      totalNetPnlPct: tracker.totalNetPnlPct,
+      profitFactor: tracker.profitFactor,
+      circuitBreakerActive: tracker.circuitBreaker.active
+    },
     portfolio: {
       currentBalanceUsd: portfolio.currentBalanceUsd,
       totalPnlPct: portfolio.totalPnlPct,

@@ -60,65 +60,121 @@ export async function runHistoricalBacktest(
 
   const safeLimit = Math.max(80, Math.min(500, limit));
   const klines = await fetchMexcKlines(symbol, "15m", safeLimit);
-  if (klines.length < 50) {
+  if (klines.length < 60) {
     throw new Error(`Insufficient historical candles for ${symbol}: ${klines.length}`);
   }
 
   const closes = klines.map((k) => k.close);
   const ema9 = calcEmaSeries(closes, 9);
   const ema21 = calcEmaSeries(closes, 21);
+  const ema50 = calcEmaSeries(closes, 50);
+
+  // ATR(14) series
+  const trs: number[] = [0];
+  for (let idx = 1; idx < klines.length; idx++) {
+    const c = klines[idx];
+    const pc = klines[idx - 1].close;
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc)));
+  }
 
   const trades: BacktestTrade[] = [];
-  let i = 25;
+  let i = 52;
   let equity = 100;
   let peak = 100;
   let maxDd = 0;
 
-  while (i < klines.length - 12) {
+  while (i < klines.length - 8) {
+    const bar = klines[i];
+    const prev = klines[i - 1];
     const rsi = calcRsiAt(closes, i, 14);
-    const avgVol =
-      klines.slice(i - 20, i).reduce((sum, k) => sum + k.quoteAssetVolume, 0) / 20;
-    const volSpike = avgVol > 0 ? klines[i].quoteAssetVolume / avgVol : 0;
+    const stretchPct = ema21[i] > 0 ? ((bar.close - ema21[i]) / ema21[i]) * 100 : 0;
 
-    // Entry condition mirroring Scout + Technician + Critic core logic
+    // Stage 5.9 Entry: Full bullish ribbon (EMA9 > EMA21 > EMA50), rising EMA21, pullback touch near EMA9/21 + green reclaim
+    const ribbonBullish = ema9[i] > ema21[i] && ema21[i] > ema50[i] && ema21[i] > ema21[i - 3];
+    const dipLow = Math.min(bar.low, prev.low);
+    const touchedZone = dipLow <= ema9[i] * 1.004 && dipLow >= ema50[i] * 0.995;
+    const greenReclaim = bar.close > ema9[i] && bar.close > bar.open;
     const entrySignal =
-      ema9[i] > ema21[i] &&
-      closes[i] > ema9[i] &&
-      rsi >= 45 &&
-      rsi <= 68 &&
-      volSpike >= 1.6;
+      ribbonBullish &&
+      touchedZone &&
+      greenReclaim &&
+      rsi >= 42 &&
+      rsi <= 64 &&
+      stretchPct >= 0 &&
+      stretchPct <= 2.2;
 
     if (!entrySignal) {
       i++;
       continue;
     }
 
-    const entryPrice = closes[i];
-    const recentLow = Math.min(...klines.slice(i - 10, i + 1).map((k) => k.low));
-    const stopLoss = Math.min(recentLow * 0.996, entryPrice * 0.986);
+    const entryPrice = bar.close;
+    let atrSum = 0;
+    for (let k = i - 13; k <= i; k++) atrSum += trs[k];
+    const atr14 = atrSum / 14;
+    const recentLow = Math.min(...klines.slice(i - 9, i + 1).map((k) => k.low));
+    const atrStop = entryPrice - Math.max(atr14 * 1.8, entryPrice * 0.015);
+    const supStop = recentLow * 0.996;
+    const stopLoss = Math.min(Math.max(entryPrice * 0.97, Math.min(atrStop, supStop)), entryPrice * 0.985);
     const risk = Math.max(entryPrice - stopLoss, entryPrice * 0.008);
-    const takeProfit = entryPrice + risk * 2.2;
+    const tp1 = entryPrice + risk * 1.2;
+    const tp2 = entryPrice + risk * 2.2;
+    const tp3 = entryPrice + risk * 3.3;
 
+    let activeSl = stopLoss;
+    let tp1Hit = false;
+    let tp2Hit = false;
     let outcome: "TP_HIT" | "SL_HIT" | "EXPIRED" = "EXPIRED";
-    let exitPrice = closes[Math.min(i + 24, klines.length - 1)];
-    let exitIdx = Math.min(i + 24, klines.length - 1);
+    let exitIdx = Math.min(i + 48, klines.length - 1);
+    let exitPrice = closes[exitIdx];
+    let realizedPnlPct = ((exitPrice - entryPrice) / entryPrice) * 100;
 
-    for (let j = i + 1; j <= Math.min(i + 24, klines.length - 1); j++) {
-      if (klines[j].low <= stopLoss) {
-        outcome = "SL_HIT";
-        exitPrice = stopLoss;
+    const tp1Pct = ((tp1 - entryPrice) / entryPrice) * 100;
+    const tp2Pct = ((tp2 - entryPrice) / entryPrice) * 100;
+    const tp3Pct = ((tp3 - entryPrice) / entryPrice) * 100;
+
+    for (let j = i + 1; j <= Math.min(i + 48, klines.length - 1); j++) {
+      const candle = klines[j];
+      if (candle.low <= activeSl) {
         exitIdx = j;
+        exitPrice = activeSl;
+        if (tp2Hit) {
+          outcome = "TP_HIT";
+          realizedPnlPct = 0.4 * tp1Pct + 0.35 * tp2Pct + 0.25 * tp1Pct;
+        } else if (tp1Hit) {
+          outcome = "TP_HIT";
+          realizedPnlPct = 0.4 * tp1Pct;
+        } else {
+          outcome = "SL_HIT";
+          realizedPnlPct = ((activeSl - entryPrice) / entryPrice) * 100;
+        }
         break;
       }
-      if (klines[j].high >= takeProfit) {
-        outcome = "TP_HIT";
-        exitPrice = takeProfit;
+      if (candle.high >= tp3) {
         exitIdx = j;
+        exitPrice = tp3;
+        outcome = "TP_HIT";
+        realizedPnlPct = 0.4 * tp1Pct + 0.35 * tp2Pct + 0.25 * tp3Pct;
         break;
+      }
+      if (!tp2Hit && candle.high >= tp2) {
+        tp1Hit = true;
+        tp2Hit = true;
+        activeSl = tp1;
+      } else if (!tp1Hit && candle.high >= tp1) {
+        tp1Hit = true;
+        activeSl = entryPrice;
       }
     }
 
-    const pnlPct = Number((((exitPrice - entryPrice) / entryPrice) * 100).toFixed(2));
+    if (outcome === "EXPIRED") {
+      const remPct = ((exitPrice - entryPrice) / entryPrice) * 100;
+      if (tp2Hit) realizedPnlPct = 0.4 * tp1Pct + 0.35 * tp2Pct + 0.25 * remPct;
+      else if (tp1Hit) realizedPnlPct = 0.4 * tp1Pct + 0.6 * remPct;
+      else realizedPnlPct = remPct;
+    }
+
+    const pnlPct = Number(realizedPnlPct.toFixed(2));
     trades.push({
       entryIndex: i,
       exitIndex: exitIdx,
@@ -133,7 +189,7 @@ export async function runHistoricalBacktest(
     const dd = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
     if (dd > maxDd) maxDd = dd;
 
-    i = exitIdx + 2; // cooldown bars before next setup
+    i = exitIdx + (outcome === "SL_HIT" ? 8 : 4); // longer cooldown after SL
   }
 
   const wins = trades.filter((t) => t.pnlPct > 0).length;

@@ -87,7 +87,7 @@ export function renderDashboardHtml(): string {
             <h1 class="text-base font-extrabold tracking-tight text-white sm:text-lg">CryptoQuant-Copilot</h1>
             <span class="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
               <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
-              PRO 5.7 • MEXC Spot
+              PRO 5.9 • MEXC Spot
             </span>
           </div>
           <p class="text-[11px] font-medium italic text-cyan-300/90 sm:text-xs">
@@ -390,9 +390,44 @@ export function renderDashboardHtml(): string {
     </section>
 
     <!-- ================================================================== -->
-    <!-- TAB 3: 24S SIGNAL NATIJALARI -->
+    <!-- TAB 3: 24S & UMUMIY SIGNAL NATIJALARI -->
     <!-- ================================================================== -->
     <section id="tabPanel_signals" class="hidden space-y-5">
+      <!-- All-Time Overall Net Signal KPI Strip -->
+      <div class="neon-card neon-card-emerald rounded-2xl p-4">
+        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
+          <div>
+            <h2 class="text-sm font-extrabold text-white">🏆 Umumiy Signal Tracker Sof Natijasi (Barcha Vaqt)</h2>
+            <p class="text-[11px] text-slate-400">40% TP1 / 35% TP2 / 25% TP3 realizatsiya modeli + SL Circuit Breaker himoyasi</p>
+          </div>
+          <span id="allTimeCbBadge" class="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-bold text-emerald-300">
+            🛡️ Circuit Breaker: SOKIN
+          </span>
+        </div>
+        <div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div class="rounded-xl border border-slate-800/90 bg-slate-950/75 p-3">
+            <div class="text-[10px] font-bold uppercase tracking-wider text-emerald-400">Umumiy Sof PnL</div>
+            <div id="allTimeNetPnl" class="mt-1 font-mono text-2xl font-black text-emerald-400">0%</div>
+            <div id="allTimeAvgPnl" class="mt-0.5 text-[11px] text-slate-400">O'rtacha: 0% / signal</div>
+          </div>
+          <div class="rounded-xl border border-slate-800/90 bg-slate-950/75 p-3">
+            <div class="text-[10px] font-bold uppercase tracking-wider text-cyan-400">Jami Yopilgan</div>
+            <div id="allTimeClosed" class="mt-1 font-mono text-2xl font-black text-white">0</div>
+            <div id="allTimeSplit" class="mt-0.5 text-[11px] text-slate-400">0 TP • 0 BE • 0 SL</div>
+          </div>
+          <div class="rounded-xl border border-slate-800/90 bg-slate-950/75 p-3">
+            <div class="text-[10px] font-bold uppercase tracking-wider text-sky-400">Umumiy Aniqlik</div>
+            <div id="allTimeAccuracy" class="mt-1 font-mono text-2xl font-black text-sky-300">0%</div>
+            <div id="allTimeRiskSlots" class="mt-0.5 text-[11px] text-slate-400">Risk ostida: 0 / 4</div>
+          </div>
+          <div class="rounded-xl border border-slate-800/90 bg-slate-950/75 p-3">
+            <div class="text-[10px] font-bold uppercase tracking-wider text-purple-400">Profit Factor</div>
+            <div id="allTimePf" class="mt-1 font-mono text-2xl font-black text-purple-300">0.00</div>
+            <div id="allTimeMaxDd" class="mt-0.5 text-[11px] text-slate-400">MaxDD: 0%</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 4 Neon 24h KPI Cards -->
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <div class="neon-card rounded-2xl p-4">
@@ -540,7 +575,7 @@ export function renderDashboardHtml(): string {
         ${LEGAL_DISCLAIMER_UZ} <span class="font-semibold text-slate-300">Moliyaviy maslahat emas.</span>
       </p>
       <div class="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 5.7 • <em>"${BRAND_MOTTO}"</em></span>
+        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 5.9 • <em>"${BRAND_MOTTO}"</em></span>
         <span>100% MEXC Spot • Stablecoinlar filtrlangan • Manual Demo</span>
       </div>
     </div>
@@ -1438,6 +1473,39 @@ export function renderDashboardHtml(): string {
       }
 
       if (tracker) {
+        const netVal = Number(tracker.totalNetPnlPct || 0);
+        const avgVal = Number(tracker.avgPnlPct || 0);
+        const allNetEl = document.getElementById("allTimeNetPnl");
+        if (allNetEl) {
+          allNetEl.textContent = (netVal >= 0 ? "+" : "") + netVal + "%";
+          allNetEl.className = "mt-1 font-mono text-2xl font-black " + (netVal >= 0 ? "text-emerald-400" : "text-rose-400");
+        }
+        const allAvgEl = document.getElementById("allTimeAvgPnl");
+        if (allAvgEl) allAvgEl.textContent = "O'rtacha: " + (avgVal >= 0 ? "+" : "") + avgVal + "% / signal";
+        const allClosedEl = document.getElementById("allTimeClosed");
+        if (allClosedEl) allClosedEl.textContent = String(tracker.closedCount || 0);
+        const allSplitEl = document.getElementById("allTimeSplit");
+        if (allSplitEl) allSplitEl.textContent = (tracker.tpCount || 0) + " TP • " + (tracker.beCount || 0) + " BE • " + (tracker.slCount || 0) + " SL";
+        const allAccEl = document.getElementById("allTimeAccuracy");
+        if (allAccEl) allAccEl.textContent = (tracker.accuracyPct ?? tracker.signalWinRatePct ?? 0) + "%";
+        const allRiskEl = document.getElementById("allTimeRiskSlots");
+        if (allRiskEl) allRiskEl.textContent = "Risk ostida: " + (tracker.atRiskActiveCount ?? tracker.activeCount ?? 0) + " / 4";
+        const allPfEl = document.getElementById("allTimePf");
+        if (allPfEl) allPfEl.textContent = Number(tracker.profitFactor || 0).toFixed(2);
+        const allDdEl = document.getElementById("allTimeMaxDd");
+        if (allDdEl) allDdEl.textContent = "MaxDD: -" + Number(tracker.maxDrawdownPct || 0) + "%";
+
+        const cbEl = document.getElementById("allTimeCbBadge");
+        if (cbEl && tracker.circuitBreaker) {
+          if (tracker.circuitBreaker.active) {
+            cbEl.className = "inline-flex items-center gap-1 rounded-full border border-rose-500/60 bg-rose-500/20 px-2.5 py-0.5 text-[11px] font-bold text-rose-300 animate-pulse";
+            cbEl.textContent = "🚨 Circuit Breaker: PAUZA (" + Math.ceil((tracker.circuitBreaker.remainingSec || 0) / 60) + " daq)";
+          } else {
+            cbEl.className = "inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-bold text-emerald-300";
+            cbEl.textContent = "🛡️ Circuit Breaker: SOKIN (" + (tracker.circuitBreaker.recentSlCount || 0) + "/" + (tracker.circuitBreaker.threshold || 3) + " SL)";
+          }
+        }
+
         const badge = document.getElementById("trackerActiveBadge");
         if (badge) badge.textContent = tracker.activeCount + " faol";
         const box = document.getElementById("activeTrackerCards");

@@ -20,6 +20,7 @@
     "verify:stage5_4": "tsx scripts/e2e_stage5_4_verify.ts",
     "verify:stage5_5": "tsx scripts/e2e_stage5_5_verify.ts",
     "verify:stage5_7": "tsx scripts/e2e_stage5_7_verify.ts",
+    "verify:stage5_9": "tsx scripts/e2e_stage5_9_verify.ts",
     "audit:security": "tsx scripts/security_stress_audit.ts",
     "stress:test": "tsx scripts/stress_test_full.ts"
   },

@@ -30,7 +30,10 @@ import {
 import { addPriceAlert, listPriceAlerts, removePriceAlert } from "./priceAlert.service";
 import { calculatePositionRisk } from "../utils/tradingSession";
 import { getActiveNewsShield } from "./newsShield.service";
-import { get24hSignalReport } from "./signalTracker.service";
+import {
+  formatAllTimeTrackerTelegramText,
+  get24hSignalReport
+} from "./signalTracker.service";
 import { pushActivityLog } from "./activityLog.service";
 
 const BRAND_MOTTO = "Tez foyda emas — doimiy xotirjam, aniq savdo";
@@ -78,15 +81,14 @@ function formatStatsText(): string {
   const s = getDemoPortfolioSummary();
   const sign = s.totalPnlUsd >= 0 ? "+" : "";
   return [
-    `📊 *CryptoQuant-Copilot — Jonli Demo Statistika*`,
+    formatAllTimeTrackerTelegramText(),
     ``,
+    `📊 *Qo'lda Demo Portfel*`,
     `🔀 *Faol Rejim:* \`${getActiveSignalMode()}\``,
     `💰 *Balans:* $${s.currentBalanceUsd.toFixed(2)} (Boshlang'ich: $${s.initialBalanceUsd})`,
-    `📈 *Umumiy PnL:* ${sign}$${s.totalPnlUsd.toFixed(2)} (${sign}${s.totalPnlPct}%)`,
-    `🎯 *Win Rate:* ${s.winRatePct}% (${s.winningTrades} foyda / ${s.losingTrades} zarar)`,
-    `⚡ *Intraday:* ${s.intradayStats.winRatePct}% (${s.intradayStats.wins}/${s.intradayStats.total}) | 🏔️ *Swing:* ${s.swingStats.winRatePct}% (${s.swingStats.wins}/${s.swingStats.total})`,
-    `📂 *Ochiq pozitsiyalar:* ${s.openTradesCount} ta | *Yopilgan:* ${s.closedTradesCount} ta`,
-    `🛡️ *Max Drawdown:* ${s.maxDrawdownPct}%`,
+    `📈 *Demo PnL:* ${sign}$${s.totalPnlUsd.toFixed(2)} (${sign}${s.totalPnlPct}%)`,
+    `🎯 *Demo Win Rate:* ${s.winRatePct}% (${s.winningTrades} foyda / ${s.losingTrades} zarar)`,
+    `📂 *Ochiq:* ${s.openTradesCount} ta | *Yopilgan:* ${s.closedTradesCount} ta | 🛡️ *MaxDD:* ${s.maxDrawdownPct}%`,
     ``,
     `_Yangilangan: ${new Date(s.updatedAt).toLocaleString("uz-UZ")}_`
   ].join("\n");
