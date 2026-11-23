@@ -94,7 +94,7 @@ app.get("/health", (_req, res) => {
   const wallStreetCircuitBreaker = getWallStreetCircuitBreakerStatus();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-6.0-institutional-orderflow",
+    stage: "stage-6.1-wallstreet-exit-adx",
     status: "ok",
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),

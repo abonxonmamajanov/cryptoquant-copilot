@@ -87,7 +87,7 @@ export function renderDashboardHtml(): string {
             <h1 class="text-base font-extrabold tracking-tight text-white sm:text-lg">CryptoQuant-Copilot</h1>
             <span class="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
               <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
-              PRO 6.0 • MEXC Spot
+              PRO 6.1 • MEXC Spot
             </span>
           </div>
           <p class="text-[11px] font-medium italic text-cyan-300/90 sm:text-xs">
@@ -575,7 +575,7 @@ export function renderDashboardHtml(): string {
         ${LEGAL_DISCLAIMER_UZ} <span class="font-semibold text-slate-300">Moliyaviy maslahat emas.</span>
       </p>
       <div class="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 6.0 • <em>"${BRAND_MOTTO}"</em></span>
+        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 6.1 • <em>"${BRAND_MOTTO}"</em></span>
         <span>100% MEXC Spot • Stablecoinlar filtrlangan • Manual Demo</span>
       </div>
     </div>

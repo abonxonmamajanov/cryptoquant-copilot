@@ -7,11 +7,20 @@ import {
   resetCircuitBreakerForTest
 } from "../src/services/circuitBreaker.service";
 import {
+  calcAdx14,
   recomputeLevelsForMode,
   TechnicalAnalysisResult
 } from "../src/agents/technician.agent";
-import { runCriticRiskAgent } from "../src/agents/criticRisk.agent";
+import {
+  computeConvictionSizeMultiplier,
+  runCriticRiskAgent
+} from "../src/agents/criticRisk.agent";
 import { formatTelegramSignalCard } from "../src/agents/executive.agent";
+import {
+  evaluateOpenDemoTrades,
+  openManualDemoTrade,
+  resetDemoPortfolioForTest
+} from "../src/services/demoPortfolio.service";
 import type { ScoutCandidate } from "../src/agents/scout.agent";
 import type { MacroFlowResult } from "../src/agents/macroFlow.agent";
 
@@ -32,7 +41,7 @@ function buildBaseInputs(): {
     scoutScore: 84,
     isAnomaly: true,
     isNewAlert: true,
-    reasons: ["Stage 6.0 E2E"],
+    reasons: ["Stage 6.1 E2E"],
     detectedAt: new Date().toISOString()
   };
 
@@ -41,13 +50,15 @@ function buildBaseInputs(): {
     direction: "LONG",
     tradeMode: "SWING",
     entryPrice: 100,
-    stopLossPrice: 95.8, // wide -4.2% SWING SL initially!
-    takeProfitPrice: 110.5,
-    tp1Price: 105.88,
-    tp2Price: 110.5,
-    tp3Price: 115.96,
-    riskRewardRatio: 2.5,
+    stopLossPrice: 96.2, // wide -3.8% SWING SL initially
+    takeProfitPrice: 112.92,
+    tp1Price: 107.6,
+    tp2Price: 112.92,
+    tp3Price: 117.48,
+    riskRewardRatio: 3.4,
     rsi14: 54,
+    adx14: 28.4,
+    isChoppyMarket: false,
     ema9: 99.6,
     ema21: 99.1,
     ema50: 98.0,
@@ -61,7 +72,7 @@ function buildBaseInputs(): {
     support10Level: 96.5,
     resistanceLevel: 104,
     techScore: 88,
-    summary: "Stage 6.0 test",
+    summary: "Stage 6.1 test",
     latencyMs: 2
   };
 
@@ -82,7 +93,7 @@ function buildBaseInputs(): {
     fundingRatePct: 0.01,
     exchanges: ["MEXC", "Binance"],
     macroScore: 84,
-    summary: "Stage 6.0 macro",
+    summary: "Stage 6.1 macro",
     latencyMs: 2
   };
 
@@ -111,9 +122,10 @@ function buildBaseInputs(): {
 }
 
 async function main() {
-  console.log("=== Stage 6.0 (Order-Flow Engine + Precision Sync + Circuit Breaker) E2E Started ===");
+  console.log("=== Stage 6.0 + 6.1 (Order-Flow + Wall Street Exit Math + ADX>=20 + Conviction Sizing) E2E Started ===");
 
   resetCircuitBreakerForTest();
+  resetDemoPortfolioForTest();
 
   // 1. Live Order-Flow Engine verification on BTCUSDT (100-lvl OBI, 2.5s Anti-Spoofing, 500-trade CVD, Ask-Wall)
   const btcFlow = await runOrderFlowAnalysis("BTCUSDT", true);
@@ -135,15 +147,29 @@ async function main() {
     `[PASS] 1. Live BTCUSDT Order-Flow verified (${btcFlow.latencyMs}ms): OBI=${btcFlow.weightedObiRatio}x | TakerBuy=${btcFlow.takerBuyPct}% | CVD=$${btcFlow.cvdUsd} | AskWall=${btcFlow.majorAskWallPrice} ($${btcFlow.majorAskWallUsd}) | Spoofing=${btcFlow.isSpoofingDetected}`
   );
 
-  // 2. recomputeLevelsForMode strict INTRADAY SL clamping (-1.5% .. -2.6%) + Ask-Wall TP snapping + monotonic ordering
+  // 2. recomputeLevelsForMode strict INTRADAY SL clamping (-1.6% .. -2.5%), 1.8R/3.0R/4.0R & Ask-Wall TP snapping
   const { scout, tech, macro, orderFlow } = buildBaseInputs();
-  // Downgrade wide -4.2% SWING tech into INTRADAY with a resting Ask wall at 105.5 (below 105.72 TP2!)
+  const unsnappedIntraday = recomputeLevelsForMode(tech, "INTRADAY", null);
+  const unsnappedSlPct = Number(
+    (((unsnappedIntraday.entryPrice - unsnappedIntraday.stopLossPrice) / unsnappedIntraday.entryPrice) * 100).toFixed(2)
+  );
+  if (
+    unsnappedSlPct < 1.6 ||
+    unsnappedSlPct > 2.5 ||
+    unsnappedIntraday.riskRewardRatio < 2.95
+  ) {
+    throw new Error(`Stage 6.1 INTRADAY 3.0R payoff check failed: ${JSON.stringify(unsnappedIntraday)}`);
+  }
+
+  // With AskWall at 105.5 (between 1.8R=104.5 and 3.0R=107.5), TP2 snaps cleanly below wall while R:R >= 2.0
   const syncedIntraday = recomputeLevelsForMode(tech, "INTRADAY", 105.5);
-  const slPct = Number((((syncedIntraday.entryPrice - syncedIntraday.stopLossPrice) / syncedIntraday.entryPrice) * 100).toFixed(2));
+  const slPct = Number(
+    (((syncedIntraday.entryPrice - syncedIntraday.stopLossPrice) / syncedIntraday.entryPrice) * 100).toFixed(2)
+  );
   if (
     syncedIntraday.tradeMode !== "INTRADAY" ||
-    slPct < 1.5 ||
-    slPct > 2.6 ||
+    slPct < 1.6 ||
+    slPct > 2.5 ||
     !syncedIntraday.tp1Price ||
     !syncedIntraday.tp2Price ||
     !syncedIntraday.tp3Price ||
@@ -161,8 +187,25 @@ async function main() {
       `recomputeLevelsForMode INTRADAY clamp/snap failed (SL=-${slPct}%): ${JSON.stringify(syncedIntraday)}`
     );
   }
+
+  // Verify Wilder ADX(14) distinguishes trending vs dead flat/choppy candles
+  const trendingBars = Array.from({ length: 45 }, (_, idx) => ({
+    high: 100 + idx * 1.2 + 0.5,
+    low: 100 + idx * 1.2 - 0.3,
+    close: 100 + idx * 1.2 + 0.2
+  }));
+  const choppyBars = Array.from({ length: 45 }, (_, idx) => ({
+    high: 100 + (idx % 2 === 0 ? 0.3 : 0.25),
+    low: 100 - (idx % 2 === 0 ? 0.25 : 0.3),
+    close: 100 + (idx % 2 === 0 ? 0.1 : -0.1)
+  }));
+  const trendAdx = calcAdx14(trendingBars);
+  const chopAdx = calcAdx14(choppyBars);
+  if (trendAdx < 25 || chopAdx >= 20) {
+    throw new Error(`Wilder calcAdx14 failed: trendAdx=${trendAdx}, chopAdx=${chopAdx}`);
+  }
   console.log(
-    `[PASS] 2. recomputeLevelsForMode clamped INTRADAY SL=-${slPct}% (-1.5..-2.6%) & snapped TP2=${syncedIntraday.tp2Price} below AskWall=105.5 (R:R 1:${syncedIntraday.riskRewardRatio})`
+    `[PASS] 2. Stage 6.1 Levels (SL=-${slPct}%, 1.8R/3.0R/4.0R, AskWall snap TP2=${syncedIntraday.tp2Price}) & Wilder ADX14 (trend=${trendAdx}, chop=${chopAdx}) verified`
   );
 
   // 3. Wall Street Circuit Breaker: 3 consecutive SLs -> 4-hour pause; BE neutral; WIN resets cleanly
@@ -190,13 +233,23 @@ async function main() {
     `[PASS] 3. Wall Street Circuit Breaker verified (3x SL -> 4h pause ${r3.status.remainingMin}m; WIN -> full reset)`
   );
 
-  // 4. Stage 6.0 Critic Precision & Order-Flow Gates + 3-line Card Order-Flow proof
+  // 4. Stage 6.0 + 6.1 Critic Precision, ADX<20 Chop Gate, Conviction Sizing & 60/40 Demo Exit Math
   const okVerdict = runCriticRiskAgent(scout, syncedIntraday, macro, undefined, orderFlow);
-  if (okVerdict.verdict !== "APPROVE") {
-    throw new Error(`Expected clean Stage 6.0 setup to APPROVE: ${okVerdict.reasons.join("; ")}`);
+  if (
+    okVerdict.verdict !== "APPROVE" ||
+    okVerdict.suggestedSizeMultiplier !== 1.5 ||
+    computeConvictionSizeMultiplier(3) !== 0.5 ||
+    computeConvictionSizeMultiplier(4) !== 1.0 ||
+    computeConvictionSizeMultiplier(5) !== 1.5
+  ) {
+    throw new Error(`Expected clean Stage 6.1 5★ setup to APPROVE with 1.5x sizing: ${JSON.stringify(okVerdict)}`);
   }
 
   const rejectCases = [
+    {
+      name: "Choppy market ADX=16.5 (<20)",
+      v: runCriticRiskAgent(scout, { ...syncedIntraday, adx14: 16.5, isChoppyMarket: true }, macro, undefined, orderFlow)
+    },
     {
       name: "Overheated RSI=63 (>60)",
       v: runCriticRiskAgent(scout, { ...syncedIntraday, rsi14: 63 }, macro, undefined, orderFlow)
@@ -228,7 +281,7 @@ async function main() {
   ];
   for (const rc of rejectCases) {
     if (rc.v.verdict !== "REJECT") {
-      throw new Error(`Stage 6.0 Critic failed to REJECT [${rc.name}]`);
+      throw new Error(`Stage 6.1 Critic failed to REJECT [${rc.name}]`);
     }
   }
 
@@ -244,15 +297,45 @@ async function main() {
     throw new Error(`Expected 4H BULLISH leader to pass during BTC 4H BEARISH: ${leaderVerdict.reasons.join("; ")}`);
   }
 
+  // Verify 60/40 Demo Portfolio exit math + 5★ 1.5x ($150) default conviction sizing + -0.2R soft SL -> +0.5R at 2.3R
+  const manualRes = openManualDemoTrade({
+    scout,
+    technician: unsnappedIntraday,
+    macroFlow: macro,
+    criticRisk: okVerdict,
+    executive: null
+  });
+  if (!manualRes.ok || !manualRes.trade || manualRes.trade.positionSizeUsd !== 150) {
+    throw new Error(`Expected 5★ manual demo trade to default to $150 (1.5x): ${JSON.stringify(manualRes)}`);
+  }
+  // Step A: hit TP1 (104.5) -> remaining 40% SL moves to -0.2R (99.5), NOT 100!
+  const tp1Events: typeof manualRes.trade[] = [];
+  evaluateOpenDemoTrades(new Map([["SOLUSDT", 104.6]]), Date.now(), tp1Events);
+  if (tp1Events.length !== 1 || tp1Events[0].stopLossPrice !== 99.5) {
+    throw new Error(`Expected TP1 soft protection SL=99.5 (-0.2R): ${JSON.stringify(tp1Events)}`);
+  }
+  // Step B: hit +2.3R (105.75) -> SL upgrades to +0.5R (101.25), then pullback to 101.2 closes remaining 40% with +3.2% weighted win!
+  evaluateOpenDemoTrades(new Map([["SOLUSDT", 105.8]]), Date.now());
+  const closedDemo = evaluateOpenDemoTrades(new Map([["SOLUSDT", 101.2]]), Date.now());
+  if (closedDemo.length !== 1 || (closedDemo[0].pnlPercent ?? 0) < 3.0) {
+    throw new Error(`Expected 60/40 +0.5R trailing exit to lock >= +3.0% (+1.28R): ${JSON.stringify(closedDemo)}`);
+  }
+  resetDemoPortfolioForTest();
+
   const card = formatTelegramSignalCard(scout, syncedIntraday, macro, okVerdict, undefined, orderFlow);
-  if (!card.includes("OBI 1.8x | Taker Buy 61%") || !card.includes("• *Trend:*") || !card.includes("• *Bozor:*")) {
-    throw new Error(`Telegram 3-line card missing Stage 6.0 Order-Flow proof:\n${card}`);
+  if (
+    !card.includes("OBI 1.8x | Taker Buy 61%") ||
+    !card.includes("Tavsiya hajm:* 1.5x") ||
+    !card.includes("• *Trend:*") ||
+    !card.includes("• *Bozor:*")
+  ) {
+    throw new Error(`Telegram 3-line card missing Stage 6.1 Order-Flow / Conviction proof:\n${card}`);
   }
   console.log(
-    `[PASS] 4. All ${rejectCases.length} Stage 6.0 Precision/Order-Flow hard-reject gates + 4H leader pass + 3-line card OBI/Taker proof verified`
+    `[PASS] 4. All ${rejectCases.length} Stage 6.1 gates (incl. ADX<20), Conviction Sizing (0.5x/1.0x/1.5x), 60/40 exit (+${closedDemo[0].pnlPercent}%), & Telegram card verified`
   );
 
-  // 5. Ephemeral HTTP check for /health Stage 6.0 metadata
+  // 5. Ephemeral HTTP check for /health Stage 6.1 metadata
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const addr = server.address();
@@ -263,14 +346,15 @@ async function main() {
     const hBody = await hRes.json();
     if (
       hRes.status !== 200 ||
-      hBody.stage !== "stage-6.0-institutional-orderflow" ||
+      !String(hBody.stage || "").startsWith("stage-6.") ||
       typeof hBody.wallStreetCircuitBreaker?.active !== "boolean"
     ) {
-      throw new Error(`GET /health Stage 6.0 mismatch: ${JSON.stringify(hBody)}`);
+      throw new Error(`GET /health Stage 6.x mismatch: ${JSON.stringify(hBody)}`);
     }
-    console.log("[PASS] 5. GET /health confirmed stage-6.0-institutional-orderflow & wallStreetCircuitBreaker");
+    console.log(`[PASS] 5. GET /health confirmed ${hBody.stage} & wallStreetCircuitBreaker`);
   } finally {
     resetCircuitBreakerForTest();
+    resetDemoPortfolioForTest();
     server.close();
   }
 
@@ -278,10 +362,10 @@ async function main() {
     throw new Error("Failed to clean circuit breaker state after test");
   }
 
-  console.log("=== Stage 6.0 Verification Completed (100% PASS) ===");
+  console.log("=== Stage 6.0 + 6.1 Verification Completed (100% PASS) ===");
 }
 
 main().catch((err) => {
-  console.error("[FAIL] Stage 6.0 Verification Error:", err);
+  console.error("[FAIL] Stage 6.1 Verification Error:", err);
   process.exit(1);
 });

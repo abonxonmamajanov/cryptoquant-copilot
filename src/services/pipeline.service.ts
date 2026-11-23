@@ -137,6 +137,7 @@ export async function runFiveAgentPipeline(): Promise<{
     } else if (
       alert.eventType === "TP3_HIT" ||
       (alert.eventType === "TP2_HIT" && alert.signal.closedAt !== null) ||
+      (alert.eventType === "TP1_HIT" && alert.signal.closedAt !== null && alert.pnlPct > 0) ||
       (alert.eventType === "EXPIRED" && alert.pnlPct > 0)
     ) {
       recordWallStreetOutcome("WIN");
@@ -192,8 +193,7 @@ export async function runFiveAgentPipeline(): Promise<{
       orderFlow
     );
 
-    // Stage 6.0 Strict Mode Synchronization + Ask-Wall TP Snapping:
-    // Ensures INTRADAY setups NEVER carry a wide SWING SL (-4.2%) after Critic classification!
+    // Stage 6.1 Strict Mode Synchronization + Wall Street Exit Math + Ask-Wall TP Snapping
     const finalTradeMode = criticRisk.tradeMode ?? rawTechnician.tradeMode ?? "INTRADAY";
     const technician = recomputeLevelsForMode(
       rawTechnician,
@@ -204,7 +204,7 @@ export async function runFiveAgentPipeline(): Promise<{
     pushActivityLog(
       "TECHNICIAN",
       "INFO",
-      `${candidate.symbol}: RSI ${technician.rsi14}, R:R 1:${technician.riskRewardRatio}, rejim ${finalTradeMode}${technician.isPullbackReclaim ? " [Pullback-Reclaim]" : ""}${technician.tpSnappedToAskWall ? " [Ask-Wall TP]" : ""}`
+      `${candidate.symbol}: RSI ${technician.rsi14}, ADX ${technician.adx14}${technician.isChoppyMarket ? " [CHOP]" : ""}, R:R 1:${technician.riskRewardRatio}, rejim ${finalTradeMode}${technician.isPullbackReclaim ? " [Pullback-Reclaim]" : ""}${technician.tpSnappedToAskWall ? " [Ask-Wall TP]" : ""}`
     );
     pushActivityLog(
       "MACRO",
@@ -214,7 +214,7 @@ export async function runFiveAgentPipeline(): Promise<{
     pushActivityLog(
       "CRITIC",
       criticRisk.verdict === "APPROVE" ? "SUCCESS" : "WARN",
-      `${candidate.symbol}: ${criticRisk.verdict} (${criticRisk.confidenceScore}/100) ${criticRisk.longTermStars?.label ?? ""}`
+      `${candidate.symbol}: ${criticRisk.verdict} (${criticRisk.confidenceScore}/100) ${criticRisk.longTermStars?.label ?? ""} | Hajm ${criticRisk.suggestedSizeMultiplier.toFixed(1)}x`
     );
 
     let executive: ExecutiveDispatchResult | null = null;

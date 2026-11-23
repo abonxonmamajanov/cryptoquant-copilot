@@ -25,6 +25,7 @@ export interface TrackedSignalItem {
   tp1Hit: boolean;
   tp2Hit: boolean;
   tp3Hit: boolean;
+  trailingStep2Active?: boolean;
   status: TrackedSignalOutcome;
   telegramMessageId: number | null;
   sentAt: string;
@@ -114,10 +115,17 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_HISTORY_RETAINED = 500;
 const BRAND_MOTTO = "Tez foyda emas — doimiy xotirjam, aniq savdo";
 
-// Realistic Spot Partial Take-Profit allocation: 40% at TP1, 35% at TP2, 25% at TP3/Trail
-const TP1_WEIGHT = 0.4;
-const TP2_WEIGHT = 0.35;
-const TP3_WEIGHT = 0.25;
+// Stage 6.1 Wall Street Asymmetric Partial Take-Profit allocation:
+// 60% booked at TP1 (remaining 40% SL -> -0.2R soft protection; -> +0.5R at 2.3R), 40% booked at TP2
+const TP1_WEIGHT = 0.6;
+const TP2_WEIGHT = 0.4;
+
+function roundTrackerPrice(price: number): number {
+  if (price >= 100) return Number(price.toFixed(2));
+  if (price >= 1) return Number(price.toFixed(4));
+  if (price >= 0.01) return Number(price.toFixed(5));
+  return Number(price.toFixed(7));
+}
 
 interface TrackerState {
   active: TrackedSignalItem[];
@@ -171,6 +179,7 @@ function normalizeTrackedItem(raw: Partial<TrackedSignalItem>): TrackedSignalIte
     tp1Hit: Boolean(raw.tp1Hit),
     tp2Hit: Boolean(raw.tp2Hit),
     tp3Hit: Boolean(raw.tp3Hit),
+    trailingStep2Active: Boolean(raw.trailingStep2Active),
     status: (raw.status as TrackedSignalOutcome) ?? "ACTIVE",
     telegramMessageId: typeof raw.telegramMessageId === "number" ? raw.telegramMessageId : null,
     sentAt: String(raw.sentAt ?? new Date().toISOString()),
@@ -254,13 +263,18 @@ export function registerDispatchedSignal(
   const entry = record.technician.entryPrice;
   const tp2 = record.technician.tp2Price ?? record.technician.takeProfitPrice;
   const risk = Math.max(entry - record.technician.stopLossPrice, entry * 0.008);
-  const tp1 = record.technician.tp1Price ?? Number((entry + risk * 1.2).toFixed(5));
-  const tp3 = record.technician.tp3Price ?? Number((entry + risk * 3.3).toFixed(5));
+  const tradeMode = record.criticRisk.tradeMode ?? "INTRADAY";
+  const tp1 =
+    record.technician.tp1Price ??
+    roundTrackerPrice(entry + risk * (tradeMode === "SWING" ? 2.0 : 1.8));
+  const tp3 =
+    record.technician.tp3Price ??
+    roundTrackerPrice(entry + risk * (tradeMode === "SWING" ? 4.6 : 4.0));
 
   const item: TrackedSignalItem = {
     id: `sig_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     symbol: record.scout.symbol,
-    tradeMode: record.criticRisk.tradeMode ?? "INTRADAY",
+    tradeMode,
     entryPrice: entry,
     tp1Price: tp1,
     tp2Price: tp2,
@@ -270,6 +284,7 @@ export function registerDispatchedSignal(
     tp1Hit: false,
     tp2Hit: false,
     tp3Hit: false,
+    trailingStep2Active: false,
     status: "ACTIVE",
     telegramMessageId: typeof telegramMessageId === "number" ? telegramMessageId : null,
     sentAt: new Date().toISOString(),
@@ -302,73 +317,60 @@ export function evaluateTrackedSignals(
     const tp1Pct = pctDiff(sig.entryPrice, sig.tp1Price);
     const tp2Pct = pctDiff(sig.entryPrice, sig.tp2Price);
     const tp3Pct = pctDiff(sig.entryPrice, sig.tp3Price);
-    const sign = pnlPct >= 0 ? "+" : "";
+    const risk = Math.max(sig.entryPrice - sig.initialStopLossPrice, sig.entryPrice * 0.008);
+    const softProtectionSl = roundTrackerPrice(sig.entryPrice - risk * 0.2); // -0.2R soft protection
+    const trailTriggerPrice = sig.entryPrice + risk * 2.3; // +2.3R trail step-up
+    const trailStep2Sl = roundTrackerPrice(sig.entryPrice + risk * 0.5); // +0.5R profit lock
     const tashkentSentTime = formatTashkentTime(sig.sentAt);
 
-    // Check TP3 (Full Win & Close)
-    if (live >= sig.tp3Price) {
+    // 1. Check TP2 / TP3 (Full 60/40 Win & Close — remaining 40% booked at TP2)
+    if (live >= sig.tp2Price) {
       sig.tp1Hit = true;
       sig.tp2Hit = true;
-      sig.tp3Hit = true;
-      sig.status = "TP3_HIT";
+      const reachedTp3 = live >= sig.tp3Price;
+      sig.tp3Hit = reachedTp3;
+      sig.status = reachedTp3 ? "TP3_HIT" : "TP2_HIT";
       sig.closedAt = new Date(now).toISOString();
-      const weightedPnl = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * tp2Pct + TP3_WEIGHT * tp3Pct).toFixed(2));
+      const weightedPnl = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * tp2Pct).toFixed(2));
       sig.finalPnlPct = weightedPnl;
-      sig.runnerPnlPct = Number(tp3Pct.toFixed(2));
+      sig.runnerPnlPct = Number((reachedTp3 ? tp3Pct : tp2Pct).toFixed(2));
       state.history.unshift(sig);
       changed = true;
       alerts.push({
         signal: sig,
-        eventType: "TP3_HIT",
+        eventType: reachedTp3 ? "TP3_HIT" : "TP2_HIT",
         livePrice: live,
         pnlPct: sig.finalPnlPct,
         replyToMessageId: sig.telegramMessageId,
         telegramText: [
-          `🚀 *SIGNAL NATIJASI: ${sig.symbol} — TP3 (MAX) URILDI!*`,
-          ``,
-          `🕒 Signal vaqti: \`${tashkentSentTime}\``,
-          `🎯 Kirish: \`${sig.entryPrice}\` → TP3: \`${sig.tp3Price}\``,
-          `💰 Joriy narx: \`${live}\``,
-          `📈 Sof foyda (40/35/25): *+${sig.finalPnlPct}%* (Max +${sig.runnerPnlPct}% | ${sig.tradeMode})`
-        ].join("\n")
-      });
-      continue;
-    }
-
-    // Check TP2 (Milestone Alert + Lock 35% + Trail SL up to TP1)
-    if (!sig.tp2Hit && live >= sig.tp2Price) {
-      sig.tp1Hit = true;
-      sig.tp2Hit = true;
-      sig.stopLossPrice = sig.tp1Price; // Trail SL up to TP1
-      sig.status = "TP2_HIT";
-      changed = true;
-      const tp2Rounded = Number(tp2Pct.toFixed(2));
-      alerts.push({
-        signal: sig,
-        eventType: "TP2_HIT",
-        livePrice: live,
-        pnlPct: tp2Rounded,
-        replyToMessageId: sig.telegramMessageId,
-        telegramText: [
-          `✅ *SIGNAL NATIJASI: ${sig.symbol} — TP2 URILDI!*`,
+          reachedTp3
+            ? `🚀 *SIGNAL NATIJASI: ${sig.symbol} — TP2/TP3 TO'LIQ YOPILDI!*`
+            : `✅ *SIGNAL NATIJASI: ${sig.symbol} — TP2 (TO'LIQ FOYDA) URILDI!*`,
           ``,
           `🕒 Signal vaqti: \`${tashkentSentTime}\``,
           `🎯 Kirish: \`${sig.entryPrice}\` → TP2: \`${sig.tp2Price}\``,
           `💰 Joriy narx: \`${live}\``,
-          `📈 Foyda: *+${tp2Rounded}%* (35% yopildi) | 🛡️ Qolgan 25% SL TP1 (\`${sig.tp1Price}\`) ga surildi`
+          `📈 Sof foyda (60/40): *+${sig.finalPnlPct}%* (Runner +${sig.runnerPnlPct}% | ${sig.tradeMode})`
         ].join("\n")
       });
-      stillActive.push(sig);
       continue;
     }
 
-    // Check TP1 (Milestone Alert + Lock 40% + Move SL to Breakeven)
+    // 2. Check TP1 (Milestone Alert + Lock 60% + Move remaining 40% SL to -0.2R soft protection, or +0.5R if >= 2.3R)
     if (!sig.tp1Hit && live >= sig.tp1Price) {
       sig.tp1Hit = true;
-      sig.stopLossPrice = sig.entryPrice;
+      if (live >= trailTriggerPrice) {
+        sig.trailingStep2Active = true;
+        sig.stopLossPrice = trailStep2Sl;
+      } else {
+        sig.stopLossPrice = softProtectionSl;
+      }
       sig.status = "TP1_HIT";
       changed = true;
       const tp1Rounded = Number(tp1Pct.toFixed(2));
+      const slModeLabel = sig.trailingStep2Active
+        ? `+0.5R (\`${sig.stopLossPrice}\`) foyda himoyasiga`
+        : `-0.2R (\`${sig.stopLossPrice}\`) yumshoq himoyaga (2.3R da +0.5R)`;
       alerts.push({
         signal: sig,
         eventType: "TP1_HIT",
@@ -381,62 +383,52 @@ export function evaluateTrackedSignals(
           `🕒 Signal vaqti: \`${tashkentSentTime}\``,
           `🎯 Kirish: \`${sig.entryPrice}\` → TP1: \`${sig.tp1Price}\``,
           `💰 Joriy narx: \`${live}\``,
-          `📈 Foyda: *+${tp1Rounded}%* (40% yopildi) | 🛡️ Qolgan 60% SL Breakeven (\`${sig.entryPrice}\`) ga surildi`
+          `📈 Foyda: *+${tp1Rounded}%* (60% yopildi) | 🛡️ Qolgan 40% SL ${slModeLabel} surildi`
         ].join("\n")
       });
       stillActive.push(sig);
       continue;
     }
 
-    // Check SL / Trailed TP1 / Breakeven Exit
+    // 2b. Once TP1 is hit and price crosses +2.3R, upgrade remaining 40% SL from -0.2R to +0.5R
+    if (sig.tp1Hit && !sig.trailingStep2Active && live >= trailTriggerPrice) {
+      sig.trailingStep2Active = true;
+      sig.stopLossPrice = trailStep2Sl;
+      changed = true;
+      stillActive.push(sig);
+      continue;
+    }
+
+    // 3. Check SL / Soft-Protection (-0.2R) / +0.5R Trail Exit
     if (live <= sig.stopLossPrice) {
       sig.closedAt = new Date(now).toISOString();
       const rawSlPnl = Number(pctDiff(sig.entryPrice, sig.stopLossPrice).toFixed(2));
       sig.runnerPnlPct = rawSlPnl;
 
-      if (sig.tp2Hit && sig.stopLossPrice > sig.entryPrice) {
-        // TP1 & TP2 were booked; remaining 25% stopped in profit at trailed TP1
-        sig.status = "TP2_HIT";
-        sig.finalPnlPct = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * tp2Pct + TP3_WEIGHT * tp1Pct).toFixed(2));
-        state.history.unshift(sig);
-        changed = true;
-        alerts.push({
-          signal: sig,
-          eventType: "TP2_HIT",
-          livePrice: live,
-          pnlPct: sig.finalPnlPct,
-          replyToMessageId: sig.telegramMessageId,
-          telegramText: [
-            `✅ *SIGNAL NATIJASI: ${sig.symbol} — FOYDA BILAN YOPILDI (TP1/TP2)*`,
-            ``,
-            `🕒 Signal vaqti: \`${tashkentSentTime}\``,
-            `🎯 Kirish: \`${sig.entryPrice}\` → Trailing Yopilish: \`${sig.stopLossPrice}\``,
-            `💰 Joriy narx: \`${live}\``,
-            `📈 Sof foyda (40/35/25): *+${sig.finalPnlPct}%*`
-          ].join("\n")
-        });
-        continue;
-      }
-
       if (sig.tp1Hit) {
-        // 40% booked at TP1, remaining 60% exited at Breakeven (0%)
-        sig.status = "BREAKEVEN";
-        sig.finalPnlPct = Number((TP1_WEIGHT * tp1Pct).toFixed(2));
+        // 60% booked at TP1, remaining 40% closed at -0.2R soft SL or +0.5R trail SL
+        const weightedPnl = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * rawSlPnl).toFixed(2));
+        sig.finalPnlPct = weightedPnl;
+        sig.status = weightedPnl > 0 ? "TP1_HIT" : "BREAKEVEN";
         state.history.unshift(sig);
         changed = true;
+        const winSign = weightedPnl >= 0 ? "+" : "";
+        const exitDesc = sig.trailingStep2Active
+          ? "+0.5R TRAILING FOYDA"
+          : "TP1 60% FOYDA + -0.2R HIMOYA";
         alerts.push({
           signal: sig,
-          eventType: "BREAKEVEN",
+          eventType: sig.status === "TP1_HIT" ? "TP1_HIT" : "BREAKEVEN",
           livePrice: live,
           pnlPct: sig.finalPnlPct,
           replyToMessageId: sig.telegramMessageId,
           telegramText: [
-            `⚖️ *SIGNAL NATIJASI: ${sig.symbol} — BREAKEVEN (TP1 40% FOYDA BILAN)*`,
+            `✅ *SIGNAL NATIJASI: ${sig.symbol} — FOYDA BILAN YOPILDI (${exitDesc})*`,
             ``,
             `🕒 Signal vaqti: \`${tashkentSentTime}\``,
-            `🎯 Kirish: \`${sig.entryPrice}\` → Yopilish: \`${sig.stopLossPrice}\` (TP1 avval olingan edi)`,
+            `🎯 Kirish: \`${sig.entryPrice}\` → Qolgan 40% yopilish: \`${sig.stopLossPrice}\``,
             `💰 Joriy narx: \`${live}\``,
-            `📈 Realizatsiya (40% TP1): *+${sig.finalPnlPct}%*`
+            `📈 Sof foyda (60/40): *${winSign}${sig.finalPnlPct}%*`
           ].join("\n")
         });
         continue;
@@ -465,16 +457,14 @@ export function evaluateTrackedSignals(
       continue;
     }
 
-    // Check Expiry
+    // 4. Check Expiry
     const maxHold = sig.tradeMode === "SWING" ? MAX_HOLD_SWING_MS : MAX_HOLD_INTRADAY_MS;
     if (now - new Date(sig.sentAt).getTime() >= maxHold) {
       sig.status = "EXPIRED";
       sig.closedAt = new Date(now).toISOString();
       sig.runnerPnlPct = pnlPct;
-      if (sig.tp2Hit) {
-        sig.finalPnlPct = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * tp2Pct + TP3_WEIGHT * pnlPct).toFixed(2));
-      } else if (sig.tp1Hit) {
-        sig.finalPnlPct = Number((TP1_WEIGHT * tp1Pct + (1 - TP1_WEIGHT) * pnlPct).toFixed(2));
+      if (sig.tp1Hit) {
+        sig.finalPnlPct = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * pnlPct).toFixed(2));
       } else {
         sig.finalPnlPct = pnlPct;
       }

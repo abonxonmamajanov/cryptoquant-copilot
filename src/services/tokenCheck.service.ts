@@ -157,17 +157,19 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
     orderFlow
   );
 
+  const sizeMult = criticRisk.suggestedSizeMultiplier ?? 1.0;
   const caption = [
     `🔎 *CRYPTOQUANT-COPILOT* | ${modeHeader}`,
     ``,
     `🪙 *Juftlik:* \`${symbol}\` (MEXC Spot)`,
     `📊 *Qaror:* ${verdictBadge} | *Ishonch:* ${criticRisk.confidenceScore}/100${criticRisk.longTermStars ? ` | ${criticRisk.longTermStars.label}` : ""}`,
+    `💰 *Tavsiya hajm:* ${sizeMult.toFixed(1)}x`,
     ``,
     `🎯 *Kirish (Entry):* \`${technician.entryPrice}\``,
     `📍 *Kirish zonasi:* \`${entryZone}\``,
-    `✅ *TP1 (Breakeven):* \`${technician.tp1Price ?? technician.takeProfitPrice}\``,
-    `✅ *TP2 (Asosiy):* \`${technician.tp2Price ?? technician.takeProfitPrice}\``,
-    `🚀 *TP3 (Max):* \`${technician.tp3Price ?? technician.takeProfitPrice}\``,
+    `✅ *TP1 (60% yopish):* \`${technician.tp1Price ?? technician.takeProfitPrice}\``,
+    `✅ *TP2 (40% asosiy):* \`${technician.tp2Price ?? technician.takeProfitPrice}\``,
+    `🚀 *TP3 (Max runner):* \`${technician.tp3Price ?? technician.takeProfitPrice}\``,
     `🛑 *Stop-Loss (SL):* \`${technician.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${technician.riskRewardRatio}`,
     ``,

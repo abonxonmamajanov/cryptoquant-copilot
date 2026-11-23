@@ -73,8 +73,10 @@ export function formatThreeLineAgentSummary(
   const sessionLabelUz = getCurrentTradingSession().labelUz;
   const softWarning = critic.softWarnings?.[0] || "";
 
+  const adxSegment = typeof tech.adx14 === "number" ? ` | ADX: ${Math.round(tech.adx14)}` : "";
+
   return [
-    `• *Trend:* 15M/${trend1h}/${trend4h} | RSI: ${Math.round(tech.rsi14)} (${rsiStateUz})`,
+    `• *Trend:* 15M/${trend1h}/${trend4h} | RSI: ${Math.round(tech.rsi14)} (${rsiStateUz})${adxSegment}`,
     `• *Bozor:* ${orderFlowProof} | Fundamental: ${fundamentalBadge}`,
     `• *Eslatma:* ${sessionLabelUz}${softWarning ? " • " + softWarning : ""}`
   ];
@@ -91,10 +93,11 @@ export function formatTelegramSignalCard(
   const entryZone = formatEntryZoneRange(tech.entryPrice);
   const tradeMode = critic.tradeMode ?? tech.tradeMode ?? "INTRADAY";
   const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
-  const tp1 = tech.tp1Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 0.55);
+  const tp1 = tech.tp1Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 0.6);
   const tp2 = tech.tp2Price ?? tech.takeProfitPrice;
-  const tp3 = tech.tp3Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.45);
+  const tp3 = tech.tp3Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.35);
   const starsText = critic.longTermStars ? ` | ${critic.longTermStars.label}` : "";
+  const sizeMult = critic.suggestedSizeMultiplier ?? 1.0;
   const threeLineSummary = formatThreeLineAgentSummary(tech, macro, critic, fundamental, orderFlow);
 
   const lines = [
@@ -102,12 +105,13 @@ export function formatTelegramSignalCard(
     ``,
     `🪙 *Juftlik:* \`${scout.symbol}\` (MEXC Spot)`,
     `📊 *Yo'nalish:* LONG | *Ishonch:* ${critic.confidenceScore}/100${starsText}`,
+    `💰 *Tavsiya hajm:* ${sizeMult.toFixed(1)}x`,
     ``,
     `🎯 *Kirish (Entry):* \`${tech.entryPrice}\``,
     `📍 *Kirish zonasi (Entry Zone):* \`${entryZone}\``,
-    `✅ *TP1 (Breakeven):* \`${tp1}\``,
-    `✅ *TP2 (Asosiy):* \`${tp2}\``,
-    `🚀 *TP3 (Max):* \`${tp3}\``,
+    `✅ *TP1 (60% yopish):* \`${tp1}\``,
+    `✅ *TP2 (40% asosiy):* \`${tp2}\``,
+    `🚀 *TP3 (Max runner):* \`${tp3}\``,
     `🛑 *Stop-Loss (SL):* \`${tech.stopLossPrice}\``,
     `⚖️ *Risk / Foyda (R:R):* 1:${tech.riskRewardRatio}`,
     ``,
@@ -122,11 +126,11 @@ export function formatTelegramSignalCard(
 
 export function formatTp1BreakevenCard(trade: DemoTradeItem): string {
   return [
-    `🎯 *TP1 URILDI (${trade.symbol})* — SL kirish narxiga (*Breakeven:* \`${trade.entryPrice}\`) surildi!`,
+    `🎯 *TP1 URILDI (${trade.symbol})* — 60% foyda olindi! Qolgan 40% SL \`${trade.stopLossPrice}\` (-0.2R yumshoq himoya) ga surildi!`,
     ``,
     `🪙 *Juftlik:* \`${trade.symbol}\` (${trade.tradeMode})`,
-    `✅ *TP1:* \`${trade.tp1Price}\` | 🎯 *Keyingi maqsad (TP2):* \`${trade.tp2Price}\` | 🚀 *TP3:* \`${trade.tp3Price}\``,
-    `🛡️ *Yangi Stop-Loss:* \`${trade.entryPrice}\` (Risk = 0)`
+    `✅ *TP1 (60%):* \`${trade.tp1Price}\` | 🎯 *TP2 (40%):* \`${trade.tp2Price}\` | 🚀 *TP3:* \`${trade.tp3Price}\``,
+    `🛡️ *Yangi Stop-Loss:* \`${trade.stopLossPrice}\` (2.3R da +0.5R ga ko'tariladi)`
   ].join("\n");
 }
 

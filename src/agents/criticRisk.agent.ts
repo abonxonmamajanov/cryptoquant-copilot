@@ -10,15 +10,24 @@ export interface StarRatingInfo {
   label: string;
 }
 
+export type ConvictionSizeMultiplier = 0.5 | 1.0 | 1.5;
+
 export interface CriticRiskResult {
   symbol: string;
   verdict: "APPROVE" | "REJECT";
   tradeMode?: TradeMode;
   confidenceScore: number;
   longTermStars?: StarRatingInfo;
+  suggestedSizeMultiplier: ConvictionSizeMultiplier;
   softWarnings?: string[];
   reasons: string[];
   latencyMs: number;
+}
+
+export function computeConvictionSizeMultiplier(starCount: number): ConvictionSizeMultiplier {
+  if (starCount >= 5) return 1.5;
+  if (starCount === 4) return 1.0;
+  return 0.5;
 }
 
 export function runCriticRiskAgent(
@@ -32,13 +41,18 @@ export function runCriticRiskAgent(
   const rejectReasons: string[] = [];
   const softWarnings: string[] = [];
 
-  // === STAGE 6.0 INSTITUTIONAL QUANT HARD-REJECT GATES ===
+  // === STAGE 6.1 INSTITUTIONAL QUANT HARD-REJECT GATES ===
   // (1) Technical direction & Risk/Reward gate
   if (tech.direction !== "LONG") {
     rejectReasons.push("Technician Agent LONG tuzilmasini (EMA9>21>50) tasdiqlamadi");
   }
   if (tech.riskRewardRatio < 2.0) {
     rejectReasons.push(`Risk/Foyda nisbati past (1:${tech.riskRewardRatio} < 1:2.0)`);
+  }
+
+  // (1b) Stage 6.1 ADX(14) Chop / Flat-Market Gate ("Cash is a position")
+  if (typeof tech.adx14 === "number" && tech.adx14 < 20) {
+    rejectReasons.push("Bozor yonlama/tinch (ADX < 20) — sovuqqon kutish rejimi");
   }
 
   // (2) MEXC ST / Delist / Spot Halted Fundamental Shield
@@ -195,7 +209,7 @@ export function runCriticRiskAgent(
     rejectReasons.push(`Umumiy ishonch balli past (${confidenceScore}/100 < 65)`);
   }
 
-  // Compute 1–5 Star Rating (⭐)
+  // Compute 1–5 Star Rating (⭐) & Stage 6.1 Star-Rating Conviction Sizing
   let baseStars = 3;
   if (confidenceScore >= 78) baseStars = 5;
   else if (confidenceScore >= 68) baseStars = 4;
@@ -209,6 +223,7 @@ export function runCriticRiskAgent(
     count: starCount,
     label: `${"⭐".repeat(starCount)}${"☆".repeat(5 - starCount)} (${starCount}/5)`
   };
+  const suggestedSizeMultiplier = computeConvictionSizeMultiplier(starCount);
 
   // Hybrid Trade Mode classification: SWING requires non-bearish BTC 4H & coin above 4H EMA50
   const tradeMode: TradeMode =
@@ -224,13 +239,14 @@ export function runCriticRiskAgent(
     orderFlow && !orderFlow.degraded
       ? ` | OBI ${orderFlow.weightedObiRatio}x, Taker ${orderFlow.takerBuyPct}%`
       : "";
+  const adxTag = typeof tech.adx14 === "number" ? ` | ADX ${tech.adx14}` : "";
 
   const verdict: "APPROVE" | "REJECT" = rejectReasons.length === 0 ? "APPROVE" : "REJECT";
   const reasons =
     verdict === "APPROVE"
       ? [
-          `R:R 1:${tech.riskRewardRatio} talabga mos (${tradeMode})`,
-          `Reyting: ${longTermStars.label} | RSI ${tech.rsi14}${tech.isPullbackReclaim ? " | Pullback-Reclaim ✅" : ""}`,
+          `R:R 1:${tech.riskRewardRatio} talabga mos (${tradeMode}) | Tavsiya hajm: ${suggestedSizeMultiplier.toFixed(1)}x`,
+          `Reyting: ${longTermStars.label} | RSI ${tech.rsi14}${adxTag}${tech.isPullbackReclaim ? " | Pullback-Reclaim ✅" : ""}`,
           `1H/4H: ${macro.trend1h ?? macro.regime}/${macro.trend4h ?? macro.regime} | BTC: ${macro.btcChange1hPct >= 0 ? "+" : ""}${macro.btcChange1hPct}%${orderFlowTag}`
         ]
       : rejectReasons;
@@ -241,6 +257,7 @@ export function runCriticRiskAgent(
     tradeMode,
     confidenceScore,
     longTermStars,
+    suggestedSizeMultiplier,
     softWarnings,
     reasons,
     latencyMs: Date.now() - started

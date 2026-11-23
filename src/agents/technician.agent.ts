@@ -15,6 +15,8 @@ export interface TechnicalAnalysisResult {
   tp3Price?: number;
   riskRewardRatio: number;
   rsi14: number;
+  adx14: number;
+  isChoppyMarket: boolean;
   ema9: number;
   ema21: number;
   ema50?: number;
@@ -68,6 +70,82 @@ function calcRsi(closes: number[], period = 14): number {
   return Number((100 - 100 / (1 + rs)).toFixed(2));
 }
 
+/**
+ * Standard Wilder ADX(14) series calculator.
+ * Values < 20 indicate dead sideways/choppy market ("Cash is a position").
+ */
+export function calcAdxSeries(
+  klines: Array<{ high: number; low: number; close: number }>,
+  period = 14
+): number[] {
+  const n = klines.length;
+  const out = new Array<number>(n).fill(25);
+  if (n < period * 2) return out;
+
+  const tr = new Array<number>(n).fill(0);
+  const plusDm = new Array<number>(n).fill(0);
+  const minusDm = new Array<number>(n).fill(0);
+
+  for (let i = 1; i < n; i++) {
+    const curr = klines[i];
+    const prev = klines[i - 1];
+    const upMove = curr.high - prev.high;
+    const downMove = prev.low - curr.low;
+    plusDm[i] = upMove > downMove && upMove > 0 ? upMove : 0;
+    minusDm[i] = downMove > upMove && downMove > 0 ? downMove : 0;
+    tr[i] = Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close)
+    );
+  }
+
+  let smoothTr = 0;
+  let smoothPlus = 0;
+  let smoothMinus = 0;
+  for (let i = 1; i <= period; i++) {
+    smoothTr += tr[i];
+    smoothPlus += plusDm[i];
+    smoothMinus += minusDm[i];
+  }
+
+  const dx = new Array<number>(n).fill(0);
+  for (let i = period; i < n; i++) {
+    if (i > period) {
+      smoothTr = smoothTr - smoothTr / period + tr[i];
+      smoothPlus = smoothPlus - smoothPlus / period + plusDm[i];
+      smoothMinus = smoothMinus - smoothMinus / period + minusDm[i];
+    }
+    const plusDi = smoothTr > 0 ? (100 * smoothPlus) / smoothTr : 0;
+    const minusDi = smoothTr > 0 ? (100 * smoothMinus) / smoothTr : 0;
+    const diSum = plusDi + minusDi;
+    dx[i] = diSum > 0 ? (100 * Math.abs(plusDi - minusDi)) / diSum : 0;
+  }
+
+  const firstAdxIdx = period * 2 - 1;
+  let dxSum = 0;
+  for (let i = period; i <= firstAdxIdx; i++) {
+    dxSum += dx[i];
+  }
+  let adx = dxSum / period;
+  out[firstAdxIdx] = Number(adx.toFixed(2));
+
+  for (let i = firstAdxIdx + 1; i < n; i++) {
+    adx = (adx * (period - 1) + dx[i]) / period;
+    out[i] = Number(adx.toFixed(2));
+  }
+
+  return out;
+}
+
+export function calcAdx14(
+  klines: Array<{ high: number; low: number; close: number }>
+): number {
+  if (klines.length === 0) return 25;
+  const series = calcAdxSeries(klines, 14);
+  return series[series.length - 1] ?? 25;
+}
+
 function roundPrice(price: number): number {
   if (price >= 100) return Number(price.toFixed(2));
   if (price >= 1) return Number(price.toFixed(4));
@@ -76,9 +154,10 @@ function roundPrice(price: number): number {
 }
 
 /**
- * Stage 6.0 Strict SL/TP Mode Synchronizer & Ask-Wall Liquidity Magnet Snapper.
- * Ensures INTRADAY setups NEVER inherit a wide SWING SL (-4.2%) after Critic classification,
- * and optionally snaps TP1 or TP2 0.2% below a major resting Ask wall while preserving
+ * Stage 6.1 Wall Street Asymmetric Exit Math + Strict SL/TP Mode Synchronizer & Ask-Wall Snapper.
+ * - INTRADAY (15M): SL -1.6%..-2.5% | TP1=1.8R (60% close, SL -> -0.2R; -> +0.5R at 2.3R) | TP2=3.0R (40%) | TP3=4.0R
+ * - SWING (4H):     SL -2.2%..-3.8% | TP1=2.0R (60% close, SL -> -0.2R; -> +0.5R at 2.3R) | TP2=3.4R (40%) | TP3=4.6R
+ * Optionally snaps TP1 or TP2 0.2% below a major resting Ask wall while preserving
  * SL < Entry < TP1 < TP2 < TP3 and R:R >= 2.0.
  */
 export function recomputeLevelsForMode(
@@ -95,36 +174,37 @@ export function recomputeLevelsForMode(
       ? tech.support10Level
       : support20;
 
-  const mult1 = mode === "SWING" ? 1.4 : 1.2;
-  const mult2 = mode === "SWING" ? 2.5 : 2.2;
-  const mult3 = mode === "SWING" ? 3.8 : 3.3;
+  const mult1 = mode === "SWING" ? 2.0 : 1.8;
+  const mult2 = mode === "SWING" ? 3.4 : 3.0;
+  const mult3 = mode === "SWING" ? 4.6 : 4.0;
 
   let stopLossPrice: number;
   let riskPerUnit: number;
 
   if (mode === "SWING") {
-    const swingAtrStop = entryPrice - Math.max(atr14 * 2.2, entryPrice * 0.02);
-    const maxSwingFloor = entryPrice * 0.958; // strict -4.2% max risk
+    // Stage 6.1 SWING strict bounds: -2.2% .. -3.8%
+    const swingAtrStop = entryPrice - Math.max(atr14 * 2.2, entryPrice * 0.022);
+    const maxSwingFloor = entryPrice * 0.962; // strict -3.8% max risk
     const supportStop = support20 * 0.995;
     const rawStop = Math.max(maxSwingFloor, Math.min(swingAtrStop, supportStop));
-    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.98)); // strict -2.0% min risk
+    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.978)); // strict -2.2% min risk
     riskPerUnit = Math.max(roundedEntry - stopLossPrice, roundedEntry * 0.008);
   } else {
-    // Stage 6.0 INTRADAY strict bounds: -1.5% .. -2.6%
-    const atrStop = entryPrice - Math.max(atr14 * 1.8, entryPrice * 0.015);
-    const maxIntradayFloor = entryPrice * 0.974; // strict -2.6% max risk
+    // Stage 6.1 INTRADAY strict bounds: -1.6% .. -2.5%
+    const atrStop = entryPrice - Math.max(atr14 * 1.8, entryPrice * 0.016);
+    const maxIntradayFloor = entryPrice * 0.975; // strict -2.5% max risk
     const supportStop = support10 * 0.996;
     const rawStop = Math.max(maxIntradayFloor, Math.min(atrStop, supportStop));
-    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.985)); // strict -1.5% min risk
+    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.984)); // strict -1.6% min risk
     riskPerUnit = Math.max(roundedEntry - stopLossPrice, roundedEntry * 0.008);
   }
 
   let tp1Price = roundPrice(roundedEntry + riskPerUnit * mult1);
   let tp2Price = roundPrice(
-    Math.max(roundedEntry + riskPerUnit * Math.max(mult2, 2.2), tp1Price * 1.005)
+    Math.max(roundedEntry + riskPerUnit * mult2, tp1Price * 1.005)
   );
   const tp3Price = roundPrice(
-    Math.max(roundedEntry + riskPerUnit * mult3, tp2Price + riskPerUnit * 1.0, tp2Price * 1.008)
+    Math.max(roundedEntry + riskPerUnit * mult3, tp2Price + riskPerUnit * 0.8, tp2Price * 1.008)
   );
 
   // Ask-Wall Liquidity Magnet TP Snapping (0.2% below major resting sell wall)
@@ -148,8 +228,8 @@ export function recomputeLevelsForMode(
         tp2Price = snapPrice;
         tpSnappedToAskWall = true;
       }
-    } else if (snapPrice >= roundedEntry + riskPerUnit * 0.9 && snapPrice < tp1Price) {
-      // Otherwise snap TP1 cleanly below a near-term sell wall while keeping TP2 R:R >= 2.0
+    } else if (snapPrice >= roundedEntry + riskPerUnit * 1.4 && snapPrice < tp1Price) {
+      // Otherwise snap TP1 cleanly below a near-term sell wall while keeping TP1 >= 1.4R and TP2 R:R >= 2.0
       const tp2Rr = (tp2Price - roundedEntry) / riskPerUnit;
       if (
         tp2Rr >= 2.0 &&
@@ -180,9 +260,10 @@ export function recomputeLevelsForMode(
   }
 
   const riskRewardRatio = Number(((takeProfitPrice - roundedEntry) / riskPerUnit).toFixed(2));
+  const adxTag = typeof tech.adx14 === "number" ? `, ADX=${tech.adx14}` : "";
   const summary =
     tech.direction === "LONG"
-      ? `${mode} EMA9>21>50${tech.isPullbackReclaim ? " (Pullback-Reclaim)" : ""}${tpSnappedToAskWall ? " [Ask-Wall TP]" : ""}, RSI=${tech.rsi14}, R:R=1:${riskRewardRatio}`
+      ? `${mode} EMA9>21>50${tech.isPullbackReclaim ? " (Pullback-Reclaim)" : ""}${tpSnappedToAskWall ? " [Ask-Wall TP]" : ""}, RSI=${tech.rsi14}${adxTag}, R:R=1:${riskRewardRatio}`
       : tech.summary;
 
   return {
@@ -211,6 +292,8 @@ export async function runTechnicianAgent(
 
   const entryPrice = candidate.lastPrice;
   const rsi14 = calcRsi(closes, 14);
+  const adx14 = calcAdx14(closed);
+  const isChoppyMarket = adx14 < 20;
   const ema9Series = calcEmaSeries(closes, 9);
   const ema21Series = calcEmaSeries(closes, 21);
   const ema50Series = calcEmaSeries(closes, 50);
@@ -250,7 +333,7 @@ export async function runTechnicianAgent(
       ? "SWING"
       : "INTRADAY");
 
-  // Stage 6.0 Pullback-Reclaim & EMA50 Ribbon Structure Diagnostics
+  // Stage 6.1 Pullback-Reclaim, ADX(14) & EMA50 Ribbon Structure Diagnostics
   const lastBar = closed[lastIdx];
   const prevBar = closed[Math.max(0, lastIdx - 1)];
   const stretchAboveEma21Pct =
@@ -279,17 +362,21 @@ export async function runTechnicianAgent(
   if (ema21Rising) techScore += 6;
   if (isPullbackReclaim) techScore += 16;
 
-  // Stage 6.0 Precision RSI sweet spot (42..60)
+  // Stage 6.0/6.1 Precision RSI sweet spot (42..60)
   if (rsi14 >= 44 && rsi14 <= 60) techScore += 20;
   else if (rsi14 >= 42 && rsi14 < 44) techScore += 12;
   else if (rsi14 > 60 && rsi14 <= 65) techScore += 2;
   else if (rsi14 > 65 || rsi14 < 38) techScore -= 18;
 
+  // Stage 6.1 ADX trend strength adjustment
+  if (adx14 >= 25) techScore += 4;
+  else if (isChoppyMarket) techScore -= 12;
+
   if (distToEma9Pct <= 1.2 && stretchAboveEma21Pct <= 2.2) techScore += 8;
   else if (stretchAboveEma21Pct > 2.2) techScore -= 16;
 
   if (distAboveSupportPct <= 3.5) techScore += 4;
-  techScore += 6; // base R:R >= 2.2 bonus
+  techScore += 6; // base asymmetric R:R >= 3.0 bonus
   techScore = Math.max(0, Math.min(100, Math.round(techScore)));
 
   // Strict LONG qualification: full bullish ribbon (EMA9 > EMA21 > EMA50), rising EMA21, reclaiming EMA9, RSI 42..60
@@ -310,8 +397,10 @@ export async function runTechnicianAgent(
     entryPrice: roundPrice(entryPrice),
     stopLossPrice: 0,
     takeProfitPrice: 0,
-    riskRewardRatio: 2.2,
+    riskRewardRatio: 3.0,
     rsi14,
+    adx14,
+    isChoppyMarket,
     ema9: roundPrice(ema9),
     ema21: roundPrice(ema21),
     ema50: roundPrice(ema50),
@@ -326,7 +415,7 @@ export async function runTechnicianAgent(
     support10Level: roundPrice(support10),
     resistanceLevel: roundPrice(resistanceLevel),
     techScore,
-    summary: `Texnik tuzilma zaif (RSI=${rsi14}, EMA9=${roundPrice(ema9)} / EMA21=${roundPrice(ema21)} / EMA50=${roundPrice(ema50)})`,
+    summary: `Texnik tuzilma zaif (RSI=${rsi14}, ADX=${adx14}, EMA9=${roundPrice(ema9)} / EMA21=${roundPrice(ema21)} / EMA50=${roundPrice(ema50)})`,
     latencyMs: Date.now() - started
   };
 
