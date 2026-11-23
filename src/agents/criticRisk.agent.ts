@@ -3,6 +3,7 @@ import { TechnicalAnalysisResult, TradeMode } from "./technician.agent";
 import { MacroFlowResult } from "./macroFlow.agent";
 import { FundamentalReport } from "../services/fundamental.service";
 import { getActiveNewsShield } from "../services/newsShield.service";
+import type { OrderFlowReport } from "../services/orderFlow.service";
 
 export interface StarRatingInfo {
   count: number; // 1-5
@@ -24,13 +25,14 @@ export function runCriticRiskAgent(
   scout: ScoutCandidate,
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
-  fundamental?: FundamentalReport
+  fundamental?: FundamentalReport,
+  orderFlow?: OrderFlowReport
 ): CriticRiskResult {
   const started = Date.now();
   const rejectReasons: string[] = [];
   const softWarnings: string[] = [];
 
-  // === STAGE 5.9 INSTITUTIONAL QUANT HARD-REJECT GATES ===
+  // === STAGE 6.0 INSTITUTIONAL QUANT HARD-REJECT GATES ===
   // (1) Technical direction & Risk/Reward gate
   if (tech.direction !== "LONG") {
     rejectReasons.push("Technician Agent LONG tuzilmasini (EMA9>21>50) tasdiqlamadi");
@@ -57,15 +59,20 @@ export function runCriticRiskAgent(
     );
   }
 
-  // (5) BTC Macro Regime Shield (block correlated dumps & dual-TF BTC bear trend)
+  // (5) BTC Macro Regime Shield + Stage 6.0 BTC 4H Bearish Relative-Strength Rule
   if (macro.btcChange1hPct <= -0.6) {
     rejectReasons.push(`BTC 1s bosim ostida (${macro.btcChange1hPct}% <= -0.6%) — altcoin LONG to'xtatildi`);
   }
   if (macro.btcTrend1h === "BEARISH" && macro.btcTrend4h === "BEARISH") {
     rejectReasons.push("BTC 1H va 4H trendlari ikkalasi ham BEARISH — makro himoya faol");
   }
+  if (macro.btcTrend4h === "BEARISH" && macro.trend4h !== "BULLISH") {
+    rejectReasons.push(
+      `BTC 4H BEARISH — faqat 4H BULLISH liderlarga ruxsat (bu koin 4H: ${macro.trend4h ?? "NEUTRAL"})`
+    );
+  }
 
-  // (6) Anti-Chase & Pullback-Reclaim Discipline
+  // (6) Stage 6.0 Precision Entry Discipline (7-day replay proven RSI 42-60 + Vol >= 1.0x + Pullback-Reclaim)
   const stretchAboveEma21Pct =
     typeof tech.stretchAboveEma21Pct === "number"
       ? tech.stretchAboveEma21Pct
@@ -78,8 +85,13 @@ export function runCriticRiskAgent(
       `Kechki FOMO quvish (24s +${scout.priceChange24hPct}%, RSI ${tech.rsi14}) — rad etildi`
     );
   }
-  if (tech.rsi14 > 66 || tech.rsi14 < 42) {
-    rejectReasons.push(`RSI optimal zonadan tashqarida (${tech.rsi14}, talab: 42–66)`);
+  if (tech.rsi14 > 60 || tech.rsi14 < 42) {
+    rejectReasons.push(`RSI aniq kirish zonasidan tashqarida (${tech.rsi14}, talab: 42–60)`);
+  }
+  if (scout.volumeSpikeRatio15m < 1.0) {
+    rejectReasons.push(
+      `15m savdo hajmi past (${scout.volumeSpikeRatio15m}x < 1.0x) — bo'sh likvidlikda kirish bloklandi`
+    );
   }
   if (stretchAboveEma21Pct > 2.5) {
     rejectReasons.push(
@@ -101,6 +113,18 @@ export function runCriticRiskAgent(
     rejectReasons.push(`Haddan tashqari 15m volatillik (ATR ${tech.atrPct}% > 3.2%) — whipsaw riski`);
   }
 
+  // (8) Stage 6.0 Institutional Order-Flow Hard Gate (Anti-Spoofing + Taker CVD + Weighted OBI)
+  if (orderFlow && !orderFlow.degraded) {
+    if (orderFlow.isSpoofingDetected) {
+      rejectReasons.push(orderFlow.spoofReasonUz || "Soxta xaridor devori (Spoofing) aniqlandi");
+    }
+    if (orderFlow.takerBuyPct < 45 && orderFlow.weightedObiRatio < 0.85) {
+      rejectReasons.push(
+        `Order-Flow sotuv bosimi: Taker Buy ${orderFlow.takerBuyPct}% (<45%) va OBI ${orderFlow.weightedObiRatio}x (<0.85x)`
+      );
+    }
+  }
+
   // === SOFT WARNINGS (adjust 1–5 Star Rating ⭐) ===
   let starPenalty = 0;
 
@@ -117,7 +141,7 @@ export function runCriticRiskAgent(
   }
 
   if (macro.btcTrend4h === "BEARISH") {
-    softWarnings.push("BTC 4H trendi BEARISH — kichikroq hajmda va qisqa INTRADAY intizomda ishlang");
+    softWarnings.push("BTC 4H BEARISH — faqat kuchli 4H lider sifatida ehtiyotkor kirish");
     starPenalty += 1;
   }
 
@@ -138,6 +162,18 @@ export function runCriticRiskAgent(
     starPenalty += 1;
   }
 
+  let orderFlowAdjust = 0;
+  if (orderFlow && !orderFlow.degraded) {
+    if (orderFlow.weightedObiRatio >= 1.4 && orderFlow.takerBuyPct >= 55) {
+      orderFlowAdjust = 4;
+    } else if (orderFlow.takerBuyPct < 48 || orderFlow.weightedObiRatio < 0.9) {
+      softWarnings.push(
+        `Order-Flow zaifroq (OBI ${orderFlow.weightedObiRatio}x | Taker Buy ${orderFlow.takerBuyPct}%)`
+      );
+      orderFlowAdjust = -3;
+    }
+  }
+
   const fundamentalBoost = fundamental ? fundamental.fundamentalScore * 0.1 : 8;
   const confidenceScore = Math.max(
     0,
@@ -147,13 +183,14 @@ export function runCriticRiskAgent(
         scout.scoutScore * 0.2 +
           tech.techScore * 0.44 +
           macro.macroScore * 0.26 +
-          fundamentalBoost -
+          fundamentalBoost +
+          orderFlowAdjust -
           Math.min(starPenalty * 2, 8)
       )
     )
   );
 
-  // (8) Minimum Quality Confidence Gate
+  // (9) Minimum Quality Confidence Gate
   if (confidenceScore < 65) {
     rejectReasons.push(`Umumiy ishonch balli past (${confidenceScore}/100 < 65)`);
   }
@@ -183,13 +220,18 @@ export function runCriticRiskAgent(
       ? "SWING"
       : "INTRADAY";
 
+  const orderFlowTag =
+    orderFlow && !orderFlow.degraded
+      ? ` | OBI ${orderFlow.weightedObiRatio}x, Taker ${orderFlow.takerBuyPct}%`
+      : "";
+
   const verdict: "APPROVE" | "REJECT" = rejectReasons.length === 0 ? "APPROVE" : "REJECT";
   const reasons =
     verdict === "APPROVE"
       ? [
           `R:R 1:${tech.riskRewardRatio} talabga mos (${tradeMode})`,
           `Reyting: ${longTermStars.label} | RSI ${tech.rsi14}${tech.isPullbackReclaim ? " | Pullback-Reclaim ✅" : ""}`,
-          `1H/4H: ${macro.trend1h ?? macro.regime}/${macro.trend4h ?? macro.regime} | BTC: ${macro.btcChange1hPct >= 0 ? "+" : ""}${macro.btcChange1hPct}%`
+          `1H/4H: ${macro.trend1h ?? macro.regime}/${macro.trend4h ?? macro.regime} | BTC: ${macro.btcChange1hPct >= 0 ? "+" : ""}${macro.btcChange1hPct}%${orderFlowTag}`
         ]
       : rejectReasons;
 

@@ -160,14 +160,56 @@ export async function fetchMexcKlines15m(symbol: string, limit = 22): Promise<Me
   return fetchMexcKlines(symbol, "15m", limit);
 }
 
+export interface MexcRecentTrade {
+  id: string;
+  price: number;
+  qty: number;
+  quoteQty: number;
+  time: number;
+  isBuyerMaker: boolean;
+}
+
 export async function fetchMexcOrderBook(symbol: string, limit = 20): Promise<MexcOrderBook> {
   const raw = await fetchWithMirrorFallback<{
     bids: Array<[string, string]>;
     asks: Array<[string, string]>;
-  }>(`/api/v3/depth?symbol=${encodeURIComponent(symbol)}&limit=${limit}`, 10000);
+  }>(`/api/v3/depth?symbol=${encodeURIComponent(symbol.toUpperCase().trim())}&limit=${limit}`, 10000);
 
   return {
     bids: (raw.bids || []).map(([p, q]) => [Number(p), Number(q)]),
     asks: (raw.asks || []).map(([p, q]) => [Number(p), Number(q)])
   };
+}
+
+export async function fetchMexcRecentTrades(
+  symbol: string,
+  limit = 500
+): Promise<MexcRecentTrade[]> {
+  const safeLimit = Math.max(10, Math.min(1000, Math.floor(limit)));
+  const raw = await fetchWithMirrorFallback<
+    Array<{
+      id?: string | number;
+      price?: string | number;
+      qty?: string | number;
+      quoteQty?: string | number;
+      time?: number;
+      isBuyerMaker?: boolean;
+    }>
+  >(`/api/v3/trades?symbol=${encodeURIComponent(symbol.toUpperCase().trim())}&limit=${safeLimit}`, 10000);
+
+  return (raw || [])
+    .map((t) => {
+      const price = Number(t.price || 0);
+      const qty = Number(t.qty || 0);
+      const quoteQty = Number(t.quoteQty || price * qty);
+      return {
+        id: String(t.id ?? ""),
+        price,
+        qty,
+        quoteQty: Number.isFinite(quoteQty) ? quoteQty : price * qty,
+        time: Number(t.time || 0),
+        isBuyerMaker: Boolean(t.isBuyerMaker)
+      };
+    })
+    .filter((t) => Number.isFinite(t.price) && t.price > 0 && Number.isFinite(t.qty) && t.qty > 0);
 }

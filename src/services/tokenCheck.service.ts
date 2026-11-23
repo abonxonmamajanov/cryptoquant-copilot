@@ -1,12 +1,13 @@
 import { fetchMexcKlines, fetchMexcTicker24h } from "./mexcClient.service";
 import { isFilteredOutSymbol, ScoutCandidate } from "../agents/scout.agent";
-import { runTechnicianAgent } from "../agents/technician.agent";
+import { recomputeLevelsForMode, runTechnicianAgent } from "../agents/technician.agent";
 import { runMacroFlowAgent } from "../agents/macroFlow.agent";
 import { runCriticRiskAgent } from "../agents/criticRisk.agent";
 import { formatEntryZoneRange, formatThreeLineAgentSummary } from "../agents/executive.agent";
 import { EvaluatedSignalRecord } from "./pipeline.service";
 import { generate15mChartPng } from "./chartGenerator.service";
 import { runFundamentalShield } from "./fundamental.service";
+import { runOrderFlowAnalysis } from "./orderFlow.service";
 
 export interface TokenCheckResult {
   symbol: string;
@@ -110,19 +111,27 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
     detectedAt: new Date().toISOString()
   };
 
-  const [technician, macroFlow, fundamental] = await Promise.all([
+  const [rawTechnician, macroFlow, fundamental, orderFlow] = await Promise.all([
     runTechnicianAgent(scout),
     runMacroFlowAgent(symbol),
-    runFundamentalShield(symbol)
+    runFundamentalShield(symbol),
+    runOrderFlowAnalysis(symbol, false)
   ]);
 
-  const criticRisk = runCriticRiskAgent(scout, technician, macroFlow, fundamental);
+  const criticRisk = runCriticRiskAgent(scout, rawTechnician, macroFlow, fundamental, orderFlow);
+  const tradeMode = criticRisk.tradeMode ?? rawTechnician.tradeMode ?? "INTRADAY";
+  const technician = recomputeLevelsForMode(
+    rawTechnician,
+    tradeMode,
+    orderFlow.degraded ? null : orderFlow.majorAskWallPrice
+  );
 
   const record: EvaluatedSignalRecord = {
     scout,
     technician,
     macroFlow,
     fundamental,
+    orderFlow,
     criticRisk,
     executive: null
   };
@@ -138,14 +147,14 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
 
   const verdictBadge =
     criticRisk.verdict === "APPROVE" ? "✅ TASDIQLANDI (APPROVE)" : "❌ RAD ETILDI (REJECT)";
-  const tradeMode = criticRisk.tradeMode ?? technician.tradeMode ?? "INTRADAY";
   const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
   const entryZone = formatEntryZoneRange(technician.entryPrice);
   const threeLineSummary = formatThreeLineAgentSummary(
     technician,
     macroFlow,
     criticRisk,
-    fundamental
+    fundamental,
+    orderFlow
   );
 
   const caption = [

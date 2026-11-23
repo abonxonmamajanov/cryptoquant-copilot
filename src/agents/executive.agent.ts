@@ -10,6 +10,7 @@ import { buildTelegramSignalReplyMarkup } from "../utils/exchangeLinks";
 import { fetchMexcKlines } from "../services/mexcClient.service";
 import { generate15mChartPng } from "../services/chartGenerator.service";
 import { getCurrentTradingSession } from "../utils/tradingSession";
+import type { OrderFlowReport } from "../services/orderFlow.service";
 
 export interface ExecutiveDispatchResult {
   symbol: string;
@@ -45,15 +46,16 @@ export function formatThreeLineAgentSummary(
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
   critic: CriticRiskResult,
-  fundamental?: FundamentalReport
+  fundamental?: FundamentalReport,
+  orderFlow?: OrderFlowReport
 ): string[] {
   const trend1h = macro.trend1h ?? macro.regime;
   const trend4h = macro.trend4h ?? macro.regime;
 
   let rsiStateUz = "Sog'lom";
   if (tech.rsi14 < 40) rsiStateUz = "Sotilgan";
-  else if (tech.rsi14 <= 64) rsiStateUz = "Sog'lom";
-  else if (tech.rsi14 <= 72) rsiStateUz = "Faol";
+  else if (tech.rsi14 <= 60) rsiStateUz = "Sog'lom";
+  else if (tech.rsi14 <= 70) rsiStateUz = "Faol";
   else rsiStateUz = "Qizigan";
 
   let buyerStrengthUz = "Muvozanatli";
@@ -63,13 +65,17 @@ export function formatThreeLineAgentSummary(
   const exchanges = (macro.exchanges && macro.exchanges.length > 0 ? macro.exchanges : ["MEXC"]).join(
     "+"
   );
+  const orderFlowProof =
+    orderFlow && !orderFlow.degraded
+      ? `OBI ${orderFlow.weightedObiRatio}x | Taker Buy ${orderFlow.takerBuyPct}%`
+      : `${buyerStrengthUz} (${macro.bidAskRatio}x, ${exchanges})`;
   const fundamentalBadge = fundamental?.badgeUz ?? "✅ Sog'lom";
   const sessionLabelUz = getCurrentTradingSession().labelUz;
   const softWarning = critic.softWarnings?.[0] || "";
 
   return [
     `• *Trend:* 15M/${trend1h}/${trend4h} | RSI: ${Math.round(tech.rsi14)} (${rsiStateUz})`,
-    `• *Bozor:* ${buyerStrengthUz} (${macro.bidAskRatio}x, ${exchanges}) | Fundamental: ${fundamentalBadge}`,
+    `• *Bozor:* ${orderFlowProof} | Fundamental: ${fundamentalBadge}`,
     `• *Eslatma:* ${sessionLabelUz}${softWarning ? " • " + softWarning : ""}`
   ];
 }
@@ -79,7 +85,8 @@ export function formatTelegramSignalCard(
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
   critic: CriticRiskResult,
-  fundamental?: FundamentalReport
+  fundamental?: FundamentalReport,
+  orderFlow?: OrderFlowReport
 ): string {
   const entryZone = formatEntryZoneRange(tech.entryPrice);
   const tradeMode = critic.tradeMode ?? tech.tradeMode ?? "INTRADAY";
@@ -88,7 +95,7 @@ export function formatTelegramSignalCard(
   const tp2 = tech.tp2Price ?? tech.takeProfitPrice;
   const tp3 = tech.tp3Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.45);
   const starsText = critic.longTermStars ? ` | ${critic.longTermStars.label}` : "";
-  const threeLineSummary = formatThreeLineAgentSummary(tech, macro, critic, fundamental);
+  const threeLineSummary = formatThreeLineAgentSummary(tech, macro, critic, fundamental, orderFlow);
 
   const lines = [
     `🚀 *CRYPTOQUANT-COPILOT SIGNAL* | ${modeHeader}`,
@@ -294,9 +301,10 @@ export async function runExecutiveAgent(
   tech: TechnicalAnalysisResult,
   macro: MacroFlowResult,
   critic: CriticRiskResult,
-  fundamental?: FundamentalReport
+  fundamental?: FundamentalReport,
+  orderFlow?: OrderFlowReport
 ): Promise<ExecutiveDispatchResult> {
-  const telegramMessage = formatTelegramSignalCard(scout, tech, macro, critic, fundamental);
+  const telegramMessage = formatTelegramSignalCard(scout, tech, macro, critic, fundamental, orderFlow);
   const replyMarkup = buildTelegramSignalReplyMarkup(scout.symbol, tech.entryPrice);
 
   let chartPng: Buffer | null = null;

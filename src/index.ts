@@ -50,6 +50,7 @@ import { get24hSignalReport, getSignalTrackerSummary } from "./services/signalTr
 import { getActiveNewsShield } from "./services/newsShield.service";
 import { getRecentActivityLogs, pushActivityLog } from "./services/activityLog.service";
 import { addPriceAlert, listPriceAlerts, removePriceAlert } from "./services/priceAlert.service";
+import { getCircuitBreakerStatus as getWallStreetCircuitBreakerStatus } from "./services/circuitBreaker.service";
 import {
   createRateLimiter,
   isSafeSymbolInput,
@@ -90,13 +91,15 @@ app.get("/ping", (_req, res) => {
 app.get("/health", (_req, res) => {
   const portfolio = getDemoPortfolioSummary();
   const tracker = getSignalTrackerSummary();
+  const wallStreetCircuitBreaker = getWallStreetCircuitBreakerStatus();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-5.9-quant-alpha-shield",
+    stage: "stage-6.0-institutional-orderflow",
     status: "ok",
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),
     scheduler: getSchedulerStats(),
+    wallStreetCircuitBreaker,
     signalTracker: {
       activeCount: tracker.activeCount,
       atRiskActiveCount: tracker.atRiskActiveCount,
@@ -107,7 +110,7 @@ app.get("/health", (_req, res) => {
       accuracyPct: tracker.accuracyPct,
       totalNetPnlPct: tracker.totalNetPnlPct,
       profitFactor: tracker.profitFactor,
-      circuitBreakerActive: tracker.circuitBreaker.active
+      circuitBreakerActive: tracker.circuitBreaker.active || wallStreetCircuitBreaker.active
     },
     portfolio: {
       currentBalanceUsd: portfolio.currentBalanceUsd,

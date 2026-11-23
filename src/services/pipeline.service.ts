@@ -1,6 +1,10 @@
 import { fetchMexcTickers24h } from "./mexcClient.service";
 import { runScoutScan, ScoutCandidate, ScoutScanSnapshot } from "../agents/scout.agent";
-import { runTechnicianAgent, TechnicalAnalysisResult } from "../agents/technician.agent";
+import {
+  recomputeLevelsForMode,
+  runTechnicianAgent,
+  TechnicalAnalysisResult
+} from "../agents/technician.agent";
 import { runMacroFlowAgent, MacroFlowResult } from "../agents/macroFlow.agent";
 import { runCriticRiskAgent, CriticRiskResult } from "../agents/criticRisk.agent";
 import {
@@ -15,6 +19,11 @@ import {
   markSignalDispatched,
   recordSymbolStopLoss
 } from "./cooldown.service";
+import {
+  getCircuitBreakerStatus as getWallStreetCircuitBreakerStatus,
+  recordSignalOutcome as recordWallStreetOutcome
+} from "./circuitBreaker.service";
+import { OrderFlowReport, runOrderFlowAnalysis } from "./orderFlow.service";
 import {
   DemoPortfolioSummary,
   DemoTradeItem,
@@ -40,6 +49,7 @@ export interface EvaluatedSignalRecord {
   technician: TechnicalAnalysisResult;
   macroFlow: MacroFlowResult;
   fundamental?: FundamentalReport;
+  orderFlow?: OrderFlowReport;
   criticRisk: CriticRiskResult;
   executive: ExecutiveDispatchResult | null;
 }
@@ -104,7 +114,7 @@ export async function runFiveAgentPipeline(): Promise<{
     await sendTelegramTextMessage(formatTradeClosedCard(closedTrade)).catch(() => {});
   }
 
-  // 1b. Evaluate ALL dispatched auto-signals in Signal Tracker (Reply to original signal + feed SL Circuit Breaker)
+  // 1b. Evaluate ALL dispatched auto-signals in Signal Tracker (Reply to original signal + Wall Street Circuit Breaker)
   const signalAlertsThisRun = evaluateTrackedSignals(priceMap);
   for (const alert of signalAlertsThisRun) {
     const lvl = alert.eventType === "SL_HIT" ? "WARN" : "SUCCESS";
@@ -113,12 +123,27 @@ export async function runFiveAgentPipeline(): Promise<{
       lvl,
       `${alert.signal.symbol} → ${alert.eventType} (${alert.pnlPct >= 0 ? "+" : ""}${alert.pnlPct}%) @ ${alert.livePrice}`
     );
+
     if (alert.eventType === "SL_HIT") {
       const cb = recordSymbolStopLoss(alert.signal.symbol);
       if (cb.active && cb.reason) {
         pushActivityLog("CRITIC", "ALERT", cb.reason);
       }
+      const wsCb = recordWallStreetOutcome("SL");
+      if (wsCb.triggeredNow && wsCb.reasonUz) {
+        pushActivityLog("CRITIC", "ALERT", wsCb.reasonUz);
+        await sendTelegramTextMessage(wsCb.reasonUz).catch(() => {});
+      }
+    } else if (
+      alert.eventType === "TP3_HIT" ||
+      (alert.eventType === "TP2_HIT" && alert.signal.closedAt !== null) ||
+      (alert.eventType === "EXPIRED" && alert.pnlPct > 0)
+    ) {
+      recordWallStreetOutcome("WIN");
+    } else if (alert.eventType === "BREAKEVEN") {
+      recordWallStreetOutcome("BE");
     }
+
     await sendTelegramTextMessage(alert.telegramText, alert.replyToMessageId).catch(() => {});
   }
 
@@ -147,24 +172,45 @@ export async function runFiveAgentPipeline(): Promise<{
   const records: EvaluatedSignalRecord[] = [];
 
   for (const candidate of topCandidates) {
-    const [technician, macroFlow, fundamental] = await Promise.all([
+    const [rawTechnician, macroFlow, fundamental] = await Promise.all([
       runTechnicianAgent(candidate),
       runMacroFlowAgent(candidate.symbol),
       runFundamentalShield(candidate.symbol)
     ]);
 
+    // Stage 6.0 Institutional Order-Flow Engine (run 2.5s Anti-Spoofing check on live LONG setups)
+    const orderFlow = await runOrderFlowAnalysis(
+      candidate.symbol,
+      rawTechnician.direction === "LONG" && rawTechnician.isPullbackReclaim !== false
+    );
+
+    const criticRisk = runCriticRiskAgent(
+      candidate,
+      rawTechnician,
+      macroFlow,
+      fundamental,
+      orderFlow
+    );
+
+    // Stage 6.0 Strict Mode Synchronization + Ask-Wall TP Snapping:
+    // Ensures INTRADAY setups NEVER carry a wide SWING SL (-4.2%) after Critic classification!
+    const finalTradeMode = criticRisk.tradeMode ?? rawTechnician.tradeMode ?? "INTRADAY";
+    const technician = recomputeLevelsForMode(
+      rawTechnician,
+      finalTradeMode,
+      orderFlow.degraded ? null : orderFlow.majorAskWallPrice
+    );
+
     pushActivityLog(
       "TECHNICIAN",
       "INFO",
-      `${candidate.symbol}: RSI ${technician.rsi14}, R:R 1:${technician.riskRewardRatio}, rejim ${technician.tradeMode ?? "INTRADAY"}${technician.isPullbackReclaim ? " [Pullback-Reclaim]" : ""}`
+      `${candidate.symbol}: RSI ${technician.rsi14}, R:R 1:${technician.riskRewardRatio}, rejim ${finalTradeMode}${technician.isPullbackReclaim ? " [Pullback-Reclaim]" : ""}${technician.tpSnappedToAskWall ? " [Ask-Wall TP]" : ""}`
     );
     pushActivityLog(
       "MACRO",
-      macroFlow.regime === "BEARISH" ? "WARN" : "INFO",
-      `${candidate.symbol}: 1H/4H ${macroFlow.trend1h}/${macroFlow.trend4h}, BTC ${macroFlow.btcChange1hPct >= 0 ? "+" : ""}${macroFlow.btcChange1hPct}% (${macroFlow.btcTrend1h ?? "—"}/${macroFlow.btcTrend4h ?? "—"}), Bid/Ask ${macroFlow.bidAskRatio}x`
+      macroFlow.regime === "BEARISH" || orderFlow.isSpoofingDetected ? "WARN" : "INFO",
+      `${candidate.symbol}: 1H/4H ${macroFlow.trend1h}/${macroFlow.trend4h}, BTC ${macroFlow.btcChange1hPct >= 0 ? "+" : ""}${macroFlow.btcChange1hPct}% (${macroFlow.btcTrend1h ?? "—"}/${macroFlow.btcTrend4h ?? "—"}), OBI ${orderFlow.weightedObiRatio}x | Taker ${orderFlow.takerBuyPct}%${orderFlow.isSpoofingDetected ? " [SPOOFING!]" : ""}`
     );
-
-    const criticRisk = runCriticRiskAgent(candidate, technician, macroFlow, fundamental);
     pushActivityLog(
       "CRITIC",
       criticRisk.verdict === "APPROVE" ? "SUCCESS" : "WARN",
@@ -177,20 +223,25 @@ export async function runFiveAgentPipeline(): Promise<{
       technician,
       macroFlow,
       fundamental,
+      orderFlow,
       criticRisk,
       executive
     };
 
     if (criticRisk.verdict === "APPROVE") {
-      const tradeMode = criticRisk.tradeMode ?? technician.tradeMode ?? "INTRADAY";
       const modeAllowed =
-        activeSignalMode === "HYBRID" || activeSignalMode === tradeMode;
+        activeSignalMode === "HYBRID" || activeSignalMode === finalTradeMode;
       const trackerNow = getSignalTrackerSummary();
       const atRiskCount = getAtRiskActiveCount();
       const guard = getDispatchGuardStatus(candidate.symbol);
+      const wsCb = getWallStreetCircuitBreakerStatus();
 
-      if (!modeAllowed) {
-        criticRisk.reasons.push(`Faol rejim ${activeSignalMode} — ${tradeMode} signali o'tkazib yuborildi`);
+      if (wsCb.active) {
+        criticRisk.reasons.push(
+          wsCb.reasonUz || "Wall Street Circuit Breaker faol — yangi signallar pauzada"
+        );
+      } else if (!modeAllowed) {
+        criticRisk.reasons.push(`Faol rejim ${activeSignalMode} — ${finalTradeMode} signali o'tkazib yuborildi`);
       } else if (hasActiveSignal(candidate.symbol)) {
         criticRisk.reasons.push("Ushbu juftlikda faol signal allaqachon ochiq — dublikat bloklandi");
       } else if (atRiskCount >= MAX_AT_RISK_ACTIVE_SIGNALS || trackerNow.activeCount >= MAX_TOTAL_ACTIVE_SIGNALS) {
@@ -205,7 +256,8 @@ export async function runFiveAgentPipeline(): Promise<{
           technician,
           macroFlow,
           criticRisk,
-          fundamental
+          fundamental,
+          orderFlow
         );
         record.executive = executive;
         markSignalDispatched(candidate.symbol);
@@ -214,7 +266,7 @@ export async function runFiveAgentPipeline(): Promise<{
         pushActivityLog(
           "EXECUTIVE",
           "SUCCESS",
-          `Signal yuborildi: ${candidate.symbol} (${tradeMode}) | Entry ${technician.entryPrice} | SL ${technician.stopLossPrice} | msgId=${executive.telegramMessageId ?? "DRY"}`
+          `Signal yuborildi: ${candidate.symbol} (${finalTradeMode}) | Entry ${technician.entryPrice} | SL ${technician.stopLossPrice} | OBI ${orderFlow.weightedObiRatio}x | msgId=${executive.telegramMessageId ?? "DRY"}`
         );
       }
     }
