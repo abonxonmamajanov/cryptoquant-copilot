@@ -16,6 +16,7 @@ export type DemoTradeSource = "AUTO" | "MANUAL";
 export interface DemoTradeItem {
   id: string;
   symbol: string;
+  direction: "LONG" | "SHORT";
   exchange: "MEXC";
   source: DemoTradeSource;
   tradeMode: TradeMode;
@@ -105,6 +106,13 @@ function roundDemoPrice(price: number): number {
   return Number(price.toFixed(7));
 }
 
+function demoDirPctDiff(direction: "LONG" | "SHORT", entry: number, target: number): number {
+  if (!Number.isFinite(entry) || entry <= 0) return 0;
+  return direction === "SHORT"
+    ? ((entry - target) / entry) * 100
+    : ((target - entry) / entry) * 100;
+}
+
 // Lazy optional Prisma client for non-blocking PostgreSQL sync
 let prismaClientInstance: unknown = null;
 let prismaInitAttempted = false;
@@ -145,7 +153,7 @@ function syncSignalToPostgresNonBlocking(
         data: {
           symbol: trade.symbol,
           exchange: trade.exchange,
-          direction: "LONG",
+          direction: trade.direction,
           status,
           entryPrice: trade.entryPrice,
           takeProfitPrice: trade.takeProfitPrice,
@@ -182,10 +190,12 @@ function normalizeLoadedTrade(t: Partial<DemoTradeItem>): DemoTradeItem {
   const entry = Number(t.entryPrice ?? 0);
   const tp = Number(t.takeProfitPrice ?? entry);
   const sl = Number(t.stopLossPrice ?? entry);
+  const direction: "LONG" | "SHORT" = t.direction === "SHORT" ? "SHORT" : "LONG";
   const conv = t.convictionMultiplier === 0.5 || t.convictionMultiplier === 1.5 ? t.convictionMultiplier : 1.0;
   return {
     id: String(t.id ?? `demo_${Date.now()}`),
     symbol: String(t.symbol ?? ""),
+    direction,
     exchange: "MEXC",
     source: t.source === "MANUAL" ? "MANUAL" : "AUTO",
     tradeMode: t.tradeMode === "SWING" ? "SWING" : "INTRADAY",
@@ -246,9 +256,11 @@ function persistState(): void {
 }
 
 function classifySlPostMortem(trade: DemoTradeItem): string {
+  if (trade.direction === "SHORT" && trade.entryRsi < 40) return "RSI pastdan sotilgan edi";
   if (trade.entryRsi > 70) return "RSI yuqori edi";
   if (trade.entrySpreadPct > 0.25) return "Spread keng edi";
-  if (trade.entryBtc1hPct < -0.5) return "BTC bosimi";
+  if (trade.direction === "LONG" && trade.entryBtc1hPct < -0.5) return "BTC bosimi";
+  if (trade.direction === "SHORT" && trade.entryBtc1hPct > 0.5) return "BTC short squeeze";
   return "Bozor volatilligi / soxta impuls";
 }
 
@@ -257,22 +269,28 @@ function buildDemoTradeItem(
   positionSizeUsd: number,
   source: DemoTradeSource
 ): DemoTradeItem {
+  const direction: "LONG" | "SHORT" =
+    record.technician.direction === "SHORT" || record.criticRisk.direction === "SHORT"
+      ? "SHORT"
+      : "LONG";
   const entry = record.technician.entryPrice;
   const tp2 = record.technician.tp2Price ?? record.technician.takeProfitPrice;
-  const risk = Math.max(entry - record.technician.stopLossPrice, entry * 0.008);
+  const risk = Math.max(Math.abs(entry - record.technician.stopLossPrice), entry * 0.008);
   const tradeMode: TradeMode =
     record.criticRisk.tradeMode ?? record.technician.tradeMode ?? "INTRADAY";
+  const signDir = direction === "SHORT" ? -1 : 1;
   const tp1 =
     record.technician.tp1Price ??
-    roundDemoPrice(entry + risk * (tradeMode === "SWING" ? 2.0 : 1.8));
+    roundDemoPrice(entry + signDir * risk * (tradeMode === "SWING" ? 2.0 : 1.8));
   const tp3 =
     record.technician.tp3Price ??
-    roundDemoPrice(entry + risk * (tradeMode === "SWING" ? 4.6 : 4.0));
+    roundDemoPrice(entry + signDir * risk * (tradeMode === "SWING" ? 4.6 : 4.0));
   const convictionMultiplier = record.criticRisk.suggestedSizeMultiplier ?? 1.0;
 
   return {
     id: `demo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     symbol: record.scout.symbol,
+    direction,
     exchange: "MEXC",
     source,
     tradeMode,
@@ -309,15 +327,14 @@ function applyClosedTradePnl(
   status: DemoTradeStatus,
   now = Date.now()
 ): void {
-  // Stage 6.1 Wall Street 60% / 40% partial exit math:
-  // If TP1 was hit, 60% was already locked at TP1 and remaining 40% closes at exitPrice!
+  // Stage 6.2 Wall Street 60% / 40% partial exit math (1x LONG or 1x SHORT):
   let pnlPercent: number;
   if (trade.tp1Hit) {
-    const tp1Pct = ((trade.tp1Price - trade.entryPrice) / trade.entryPrice) * 100;
-    const remPct = ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100;
+    const tp1Pct = demoDirPctDiff(trade.direction, trade.entryPrice, trade.tp1Price);
+    const remPct = demoDirPctDiff(trade.direction, trade.entryPrice, exitPrice);
     pnlPercent = Number((DEMO_TP1_WEIGHT * tp1Pct + DEMO_TP2_WEIGHT * remPct).toFixed(2));
   } else {
-    pnlPercent = Number((((exitPrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2));
+    pnlPercent = Number(demoDirPctDiff(trade.direction, trade.entryPrice, exitPrice).toFixed(2));
   }
   const pnlUsd = Number(((trade.positionSizeUsd * pnlPercent) / 100).toFixed(2));
 
@@ -395,7 +412,7 @@ export function openManualDemoTrade(
     }
     positionSizeUsd = Number(parsed.toFixed(2));
   } else {
-    // Stage 6.1 Star-Rating Conviction Sizing default (3★=$50, 4★=$100, 5★=$150)
+    // Stage 6.1/6.2 Star-Rating Conviction Sizing default (3★=$50, 4★=$100, 5★=$150)
     const convictionMult = record.criticRisk.suggestedSizeMultiplier ?? 1.0;
     positionSizeUsd = Number(
       Math.max(10, Math.min(portfolioState.currentBalanceUsd, 100 * convictionMult)).toFixed(2)
@@ -456,17 +473,34 @@ export function evaluateOpenDemoTrades(
       continue;
     }
 
+    const isShort = trade.direction === "SHORT";
     const baseSl = trade.initialStopLossPrice ?? trade.stopLossPrice;
-    const risk = Math.max(trade.entryPrice - baseSl, trade.entryPrice * 0.008);
-    const softProtectionSl = roundDemoPrice(trade.entryPrice - risk * 0.2); // -0.2R soft protection
-    const trailTriggerPrice = trade.entryPrice + risk * 2.3; // +2.3R profit trail trigger
-    const trailStep2Sl = roundDemoPrice(trade.entryPrice + risk * 0.5); // +0.5R profit lock
+    const risk = Math.max(Math.abs(trade.entryPrice - baseSl), trade.entryPrice * 0.008);
 
-    // 1. Check TP1 60% Partial Exit + Soft -0.2R SL protection (or instant +0.5R if >= 2.3R)
-    if (!trade.tp1Hit && livePrice >= trade.tp1Price && livePrice < trade.takeProfitPrice) {
+    const softProtectionSl = isShort
+      ? roundDemoPrice(trade.entryPrice + risk * 0.2)
+      : roundDemoPrice(trade.entryPrice - risk * 0.2);
+    const trailTriggerPrice = isShort
+      ? trade.entryPrice - risk * 2.3
+      : trade.entryPrice + risk * 2.3;
+    const trailStep2Sl = isShort
+      ? roundDemoPrice(trade.entryPrice - risk * 0.5)
+      : roundDemoPrice(trade.entryPrice + risk * 0.5);
+
+    const hitTp1Zone = isShort
+      ? livePrice <= trade.tp1Price && livePrice > trade.takeProfitPrice
+      : livePrice >= trade.tp1Price && livePrice < trade.takeProfitPrice;
+    const hitTrailZone = isShort
+      ? livePrice <= trailTriggerPrice && livePrice > trade.takeProfitPrice
+      : livePrice >= trailTriggerPrice && livePrice < trade.takeProfitPrice;
+    const hitTp2 = isShort ? livePrice <= trade.takeProfitPrice : livePrice >= trade.takeProfitPrice;
+    const hitSl = isShort ? livePrice >= trade.stopLossPrice : livePrice <= trade.stopLossPrice;
+
+    // 1. Check TP1 60% Partial Exit + Soft 0.2R SL protection
+    if (!trade.tp1Hit && hitTp1Zone) {
       trade.tp1Hit = true;
       trade.breakevenActive = true;
-      if (livePrice >= trailTriggerPrice) {
+      if (hitTrailZone) {
         trade.trailingStep2Active = true;
         trade.stopLossPrice = trailStep2Sl;
       } else {
@@ -478,8 +512,8 @@ export function evaluateOpenDemoTrades(
       continue;
     }
 
-    // 1b. Upgrade remaining 40% SL from -0.2R to +0.5R once price crosses +2.3R
-    if (trade.tp1Hit && !trade.trailingStep2Active && livePrice >= trailTriggerPrice && livePrice < trade.takeProfitPrice) {
+    // 1b. Upgrade remaining 40% SL to +0.5R profit lock once price crosses 2.3R
+    if (trade.tp1Hit && !trade.trailingStep2Active && hitTrailZone) {
       trade.trailingStep2Active = true;
       trade.stopLossPrice = trailStep2Sl;
       mutated = true;
@@ -491,11 +525,11 @@ export function evaluateOpenDemoTrades(
     let exitPrice = livePrice;
     const maxHoldMs = trade.tradeMode === "SWING" ? MAX_HOLD_SWING_MS : MAX_HOLD_INTRADAY_MS;
 
-    if (livePrice >= trade.takeProfitPrice) {
+    if (hitTp2) {
       trade.tp1Hit = true;
       closeStatus = "TP_HIT";
       exitPrice = trade.takeProfitPrice;
-    } else if (livePrice <= trade.stopLossPrice) {
+    } else if (hitSl) {
       if (trade.tp1Hit) {
         closeStatus = trade.trailingStep2Active ? "TP_HIT" : "BREAKEVEN_EXIT";
         exitPrice = trade.stopLossPrice;

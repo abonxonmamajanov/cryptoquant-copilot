@@ -11,6 +11,7 @@ export interface MacroFlowResult {
   btcTrend4h?: TrendRegime;
   btcAbove4hEma50?: boolean;
   above4hEma50?: boolean;
+  below4hEma50?: boolean;
   bidDepthUsd: number;
   askDepthUsd: number;
   bidAskRatio: number;
@@ -19,6 +20,7 @@ export interface MacroFlowResult {
   trend1h?: TrendRegime;
   trend4h?: TrendRegime;
   fundingRatePct?: number | null;
+  fundingRate?: { fundingRatePct?: number | null } | null;
   exchanges?: string[];
   macroScore: number;
   summary: string;

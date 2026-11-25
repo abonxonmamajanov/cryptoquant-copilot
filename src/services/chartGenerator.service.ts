@@ -3,6 +3,7 @@ import { MexcKline } from "./mexcClient.service";
 
 export interface ChartLevels {
   symbol: string;
+  direction?: "LONG" | "SHORT" | "SKIP";
   entryPrice: number;
   takeProfitPrice: number;
   stopLossPrice: number;
@@ -286,9 +287,15 @@ export function generate15mChartPng(klines: MexcKline[], levels: ChartLevels): B
   canvas.fillRect(0, 0, W, 56, [15, 23, 42]);
   canvas.fillRect(0, 55, W, 1, BORDER);
 
+  const inferredShort =
+    levels.direction === "SHORT" ||
+    (levels.stopLossPrice > levels.entryPrice && levels.takeProfitPrice < levels.entryPrice);
+  const subLabel = inferredShort ? "SHORT (1X)" : "LONG (SPOT)";
+  const subColor: RGB = inferredShort ? [248, 113, 113] : TEXT_MUTED;
+
   canvas.drawText(`${displayPair} ${tf}`, 20, 16, TEXT_PRIMARY, 3);
   const titleW = canvas.measureTextWidth(`${displayPair} ${tf}`, 3);
-  canvas.drawText("MEXC SPOT", 34 + titleW, 24, TEXT_MUTED, 2);
+  canvas.drawText(subLabel, 34 + titleW, 24, subColor, 2);
 
   // Verdict badge on right side of header
   const verdict = (levels.verdict || "INFO").toUpperCase();

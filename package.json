@@ -22,6 +22,7 @@
     "verify:stage5_7": "tsx scripts/e2e_stage5_7_verify.ts",
     "verify:stage5_9": "tsx scripts/e2e_stage5_9_verify.ts",
     "verify:stage6_0": "tsx scripts/e2e_stage6_0_verify.ts",
+    "verify:stage6_2": "tsx scripts/e2e_stage6_2_verify.ts",
     "replay:7d": "tsx scripts/replay_7day_live_sim.ts",
     "replay:30d": "tsx scripts/replay_30day_ab_sim.ts",
     "audit:security": "tsx scripts/security_stress_audit.ts",

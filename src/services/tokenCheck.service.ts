@@ -120,11 +120,13 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
 
   const criticRisk = runCriticRiskAgent(scout, rawTechnician, macroFlow, fundamental, orderFlow);
   const tradeMode = criticRisk.tradeMode ?? rawTechnician.tradeMode ?? "INTRADAY";
-  const technician = recomputeLevelsForMode(
-    rawTechnician,
-    tradeMode,
-    orderFlow.degraded ? null : orderFlow.majorAskWallPrice
-  );
+  const isShort = rawTechnician.direction === "SHORT" || criticRisk.direction === "SHORT";
+  const targetWall = orderFlow.degraded
+    ? null
+    : isShort
+      ? orderFlow.majorBidWallPrice
+      : orderFlow.majorAskWallPrice;
+  const technician = recomputeLevelsForMode(rawTechnician, tradeMode, targetWall);
 
   const record: EvaluatedSignalRecord = {
     scout,
@@ -138,6 +140,7 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
 
   const chartPng = generate15mChartPng(klines15m, {
     symbol,
+    direction: technician.direction,
     entryPrice: technician.entryPrice,
     takeProfitPrice: technician.takeProfitPrice,
     stopLossPrice: technician.stopLossPrice,
@@ -148,6 +151,11 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
   const verdictBadge =
     criticRisk.verdict === "APPROVE" ? "✅ TASDIQLANDI (APPROVE)" : "❌ RAD ETILDI (REJECT)";
   const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
+  const dirBanner = isShort
+    ? "🔴 SHORT / SELL (1x — Xavfsiz Hedge / Nol likvidatsiya)"
+    : technician.direction === "LONG"
+      ? "🟢 LONG (SPOT)"
+      : "⚪ KUTISH (SKIP — Aniq trend kutilmoqda)";
   const entryZone = formatEntryZoneRange(technician.entryPrice);
   const threeLineSummary = formatThreeLineAgentSummary(
     technician,
@@ -160,13 +168,13 @@ async function computeTokenOnDemand(symbol: string): Promise<TokenCheckResult> {
   const sizeMult = criticRisk.suggestedSizeMultiplier ?? 1.0;
   const caption = [
     `🔎 *CRYPTOQUANT-COPILOT* | ${modeHeader}`,
+    `${dirBanner}`,
     ``,
-    `🪙 *Juftlik:* \`${symbol}\` (MEXC Spot)`,
+    `🪙 *Juftlik:* \`${symbol}\` (${isShort ? "MEXC 1x Hedge" : "MEXC Spot"})`,
     `📊 *Qaror:* ${verdictBadge} | *Ishonch:* ${criticRisk.confidenceScore}/100${criticRisk.longTermStars ? ` | ${criticRisk.longTermStars.label}` : ""}`,
     `💰 *Tavsiya hajm:* ${sizeMult.toFixed(1)}x`,
     ``,
-    `🎯 *Kirish (Entry):* \`${technician.entryPrice}\``,
-    `📍 *Kirish zonasi:* \`${entryZone}\``,
+    `🎯 *Kirish (Entry):* \`${technician.entryPrice}\` (Zona: \`${entryZone}\`)`,
     `✅ *TP1 (60% yopish):* \`${technician.tp1Price ?? technician.takeProfitPrice}\``,
     `✅ *TP2 (40% asosiy):* \`${technician.tp2Price ?? technician.takeProfitPrice}\``,
     `🚀 *TP3 (Max runner):* \`${technician.tp3Price ?? technician.takeProfitPrice}\``,

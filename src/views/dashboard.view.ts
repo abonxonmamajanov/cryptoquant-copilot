@@ -87,7 +87,7 @@ export function renderDashboardHtml(): string {
             <h1 class="text-base font-extrabold tracking-tight text-white sm:text-lg">CryptoQuant-Copilot</h1>
             <span class="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
               <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
-              PRO 6.1 • MEXC Spot
+              PRO 6.2 • Spot + 1x Hedge
             </span>
           </div>
           <p class="text-[11px] font-medium italic text-cyan-300/90 sm:text-xs">
@@ -144,6 +144,9 @@ export function renderDashboardHtml(): string {
     <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-950/80 px-4 py-2 text-xs text-slate-400">
       <div class="flex flex-wrap items-center gap-3">
         <span>Holat: <strong id="pipelineMeta" class="text-cyan-300">5-agent ulanmoqda...</strong></span>
+        <span id="marketPulseBadge" class="inline-flex items-center gap-1 rounded-full border border-cyan-500/35 bg-cyan-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-cyan-300">
+          🧭 Bozor Pulsi: 🟢 LONG / 🔴 SHORT 1x
+        </span>
         <span id="newsShieldBadge" class="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
           🛡️ News Shield: SOKIN
         </span>
@@ -575,8 +578,8 @@ export function renderDashboardHtml(): string {
         ${LEGAL_DISCLAIMER_UZ} <span class="font-semibold text-slate-300">Moliyaviy maslahat emas.</span>
       </p>
       <div class="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 6.1 • <em>"${BRAND_MOTTO}"</em></span>
-        <span>100% MEXC Spot • Stablecoinlar filtrlangan • Manual Demo</span>
+        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 6.2 • <em>"${BRAND_MOTTO}"</em></span>
+        <span>100% MEXC Spot + 1x Hedge • Stablecoinlar filtrlangan • Manual Demo</span>
       </div>
     </div>
   </footer>
@@ -1389,8 +1392,11 @@ export function renderDashboardHtml(): string {
       } else {
         openBody.innerHTML = p.openTrades.map((t) => {
           const be = t.breakevenActive ? ' <span class="rounded bg-emerald-500/20 px-1 text-[10px] text-emerald-300">BE</span>' : "";
+          const dirPill = t.direction === "SHORT"
+            ? ' <span class="rounded bg-rose-500/20 px-1 text-[10px] font-bold text-rose-300">SHORT 1x</span>'
+            : ' <span class="rounded bg-emerald-500/20 px-1 text-[10px] font-bold text-emerald-300">LONG</span>';
           return '<tr class="hover:bg-slate-800/40">' +
-            '<td class="px-4 py-2.5 font-bold text-white">' + escapeHtml(t.symbol) + be + '<div class="text-[10px] text-slate-400">' + escapeHtml(t.tradeMode) + '</div></td>' +
+            '<td class="px-4 py-2.5 font-bold text-white">' + escapeHtml(t.symbol) + dirPill + be + '<div class="text-[10px] text-slate-400">' + escapeHtml(t.tradeMode) + '</div></td>' +
             '<td class="px-3 py-2.5 font-mono">' + escapeHtml(t.entryPrice) + '</td>' +
             '<td class="px-3 py-2.5 font-mono text-[11px]"><span class="text-emerald-300">' + escapeHtml(t.tp1Price) + '</span> / <span class="text-emerald-400">' + escapeHtml(t.tp2Price) + '</span> / <span class="text-rose-400">' + escapeHtml(t.stopLossPrice) + '</span></td>' +
             '<td class="px-3 py-2.5 font-mono">$' + escapeHtml(t.positionSizeUsd) + '</td>' +
@@ -1406,8 +1412,9 @@ export function renderDashboardHtml(): string {
         closedBody.innerHTML = p.recentClosedTrades.map((t) => {
           const pos = (t.pnlUsd ?? 0) >= 0;
           const s = pos ? "+" : "";
+          const dTag = t.direction === "SHORT" ? " (SHORT 1x)" : " (LONG)";
           return '<tr class="hover:bg-slate-800/40">' +
-            '<td class="px-4 py-2.5 font-bold text-white">' + escapeHtml(t.symbol) + '</td>' +
+            '<td class="px-4 py-2.5 font-bold text-white">' + escapeHtml(t.symbol) + '<span class="text-[10px] text-slate-400">' + dTag + '</span></td>' +
             '<td class="px-3 py-2.5"><span class="rounded border px-1.5 py-0.5 text-[10px] font-bold ' + (pos ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300' : 'border-rose-500/40 bg-rose-500/15 text-rose-300') + '">' + escapeHtml(t.status) + '</span></td>' +
             '<td class="px-3 py-2.5 font-mono">' + escapeHtml(t.entryPrice) + ' → ' + escapeHtml(t.exitPrice ?? "-") + '</td>' +
             '<td class="px-3 py-2.5 font-mono ' + (pos ? 'text-emerald-400' : 'text-rose-400') + '">' + s + escapeHtml(t.pnlPercent ?? 0) + '%</td>' +
@@ -1426,6 +1433,11 @@ export function renderDashboardHtml(): string {
         " | Skaner: " + (snap.scoutSummary?.liquidEligibleCount || 0) + " likvid (" + snap.durationMs + "ms)";
       document.getElementById("lastUpdated").textContent = new Date(snap.runAt).toLocaleTimeString("uz-UZ");
 
+      const pulseEl = document.getElementById("marketPulseBadge");
+      if (pulseEl && snap.marketPulse?.biasUz) {
+        pulseEl.textContent = "🧭 Bozor Pulsi: " + snap.marketPulse.biasUz;
+      }
+
       const tbody = document.getElementById("pipelineTableBody");
       if (snap.records.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-6 text-center text-slate-500">Hozircha nomzod juftliklar topilmadi.</td></tr>';
@@ -1433,8 +1445,13 @@ export function renderDashboardHtml(): string {
       }
       tbody.innerHTML = snap.records.map((r) => {
         const ok = r.criticRisk.verdict === "APPROVE";
+        const dirBadge = r.technician.direction === "SHORT"
+          ? '<span class="ml-1 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-bold text-rose-300">🔴 SHORT 1x</span>'
+          : r.technician.direction === "LONG"
+            ? '<span class="ml-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">🟢 LONG</span>'
+            : '<span class="ml-1 rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">SKIP</span>';
         return '<tr class="hover:bg-slate-800/40">' +
-          '<td class="px-4 py-2.5"><div class="font-bold text-white">' + escapeHtml(r.scout.symbol) + '</div><div class="text-[10px] text-slate-400">' + escapeHtml(r.criticRisk.tradeMode || "INTRADAY") + ' | 24s: ' + (r.scout.priceChange24hPct >= 0 ? "+" : "") + escapeHtml(r.scout.priceChange24hPct) + '%</div></td>' +
+          '<td class="px-4 py-2.5"><div class="font-bold text-white">' + escapeHtml(r.scout.symbol) + dirBadge + '</div><div class="text-[10px] text-slate-400">' + escapeHtml(r.criticRisk.tradeMode || "INTRADAY") + ' | 24s: ' + (r.scout.priceChange24hPct >= 0 ? "+" : "") + escapeHtml(r.scout.priceChange24hPct) + '%</div></td>' +
           '<td class="px-3 py-2.5"><span class="rounded border px-2 py-0.5 text-[10px] font-bold ' + (ok ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300' : 'border-rose-500/40 bg-rose-500/15 text-rose-300') + '">' + escapeHtml(r.criticRisk.verdict) + '</span></td>' +
           '<td class="px-3 py-2.5 font-mono">' + escapeHtml(r.criticRisk.confidenceScore) + '/100 <div class="text-[10px] text-amber-300">' + escapeHtml(r.criticRisk.longTermStars?.label || "") + '</div></td>' +
           '<td class="px-3 py-2.5 font-mono">' + escapeHtml(r.technician.rsi14) + '</td>' +
@@ -1512,16 +1529,22 @@ export function renderDashboardHtml(): string {
         if (!tracker.activeSignals || tracker.activeSignals.length === 0) {
           box.innerHTML = '<div class="rounded-xl border border-slate-800 bg-slate-950/70 p-4 text-center text-slate-500">Hozircha faol kuzatuvdagi signallar yo\\'q.</div>';
         } else {
-          box.innerHTML = tracker.activeSignals.map((s) =>
-            '<div class="rounded-xl border border-cyan-500/30 bg-slate-950/80 p-3">' +
-            '<div class="flex items-center justify-between"><span class="font-mono font-bold text-white">' + escapeHtml(s.symbol) + ' (' + escapeHtml(s.tradeMode) + ')</span><span class="rounded bg-cyan-500/20 px-2 py-0.5 text-[10px] font-bold text-cyan-300">' + escapeHtml(s.status) + '</span></div>' +
-            '<div class="mt-1.5 grid grid-cols-2 gap-1 font-mono text-[11px] text-slate-300">' +
-            '<span>Entry: <strong class="text-white">' + escapeHtml(s.entryPrice) + '</strong></span>' +
-            '<span>SL: <strong class="text-rose-400">' + escapeHtml(s.stopLossPrice) + '</strong></span>' +
-            '<span>TP1: <strong class="text-emerald-300">' + escapeHtml(s.tp1Price) + '</strong></span>' +
-            '<span>TP2/3: <strong class="text-emerald-400">' + escapeHtml(s.tp2Price) + ' / ' + escapeHtml(s.tp3Price) + '</strong></span>' +
-            '</div></div>'
-          ).join("");
+          box.innerHTML = tracker.activeSignals.map((s) => {
+            const isSh = s.direction === "SHORT";
+            const dTag = isSh
+              ? '<span class="ml-1 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-bold text-rose-300">SHORT 1x</span>'
+              : '<span class="ml-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">LONG</span>';
+            return (
+              '<div class="rounded-xl border border-cyan-500/30 bg-slate-950/80 p-3">' +
+              '<div class="flex items-center justify-between"><span class="font-mono font-bold text-white">' + escapeHtml(s.symbol) + ' (' + escapeHtml(s.tradeMode) + ')' + dTag + '</span><span class="rounded bg-cyan-500/20 px-2 py-0.5 text-[10px] font-bold text-cyan-300">' + escapeHtml(s.status) + '</span></div>' +
+              '<div class="mt-1.5 grid grid-cols-2 gap-1 font-mono text-[11px] text-slate-300">' +
+              '<span>Entry: <strong class="text-white">' + escapeHtml(s.entryPrice) + '</strong></span>' +
+              '<span>SL: <strong class="text-rose-400">' + escapeHtml(s.stopLossPrice) + '</strong></span>' +
+              '<span>TP1: <strong class="text-emerald-300">' + escapeHtml(s.tp1Price) + '</strong></span>' +
+              '<span>TP2/3: <strong class="text-emerald-400">' + escapeHtml(s.tp2Price) + ' / ' + escapeHtml(s.tp3Price) + '</strong></span>' +
+              '</div></div>'
+            );
+          }).join("");
         }
       }
     }
@@ -1540,7 +1563,8 @@ export function renderDashboardHtml(): string {
           return;
         }
         if (data.portfolio) renderPortfolio(data.portfolio);
-        showToast("✅ " + data.trade.symbol + " demoda sotib olindi ($" + data.trade.positionSizeUsd + " @ " + data.trade.entryPrice + ")", false);
+        const dirWord = data.trade.direction === "SHORT" ? "SHORT 1x ochildi" : "sotib olindi";
+        showToast("✅ " + data.trade.symbol + " demoda " + dirWord + " ($" + data.trade.positionSizeUsd + " @ " + data.trade.entryPrice + ")", false);
       } catch (err) {
         showToast("❌ " + err.message, true);
       }
@@ -1589,6 +1613,13 @@ export function renderDashboardHtml(): string {
 
         const r = data.record;
         const ok = r.criticRisk.verdict === "APPROVE";
+        const isShort = r.technician.direction === "SHORT";
+        const dirBadge = isShort
+          ? '<span class="rounded bg-rose-500/20 px-2 py-0.5 text-xs font-bold text-rose-300">🔴 SHORT (1x)</span>'
+          : r.technician.direction === "LONG"
+            ? '<span class="rounded bg-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-300">🟢 LONG</span>'
+            : '<span class="rounded bg-slate-700/40 px-2 py-0.5 text-xs font-bold text-slate-400">⚪ SKIP</span>';
+        const demoBtnLabel = isShort ? "🛒 Demoda SHORT (1x) ochish ($100)" : "🛒 Demoda sotib olish ($100)";
         const rsi = Math.round(r.technician.rsi14);
         const rsiLabel = rsi < 40 ? "Sotilgan" : rsi <= 64 ? "Sog'lom" : rsi <= 72 ? "Faol" : "Qizigan";
         const buyerLabel = r.macroFlow.bidAskRatio >= 1.25 ? "Xaridorlar ustun" : r.macroFlow.bidAskRatio >= 0.9 ? "Muvozanatli" : "Sotuv bosimi";
@@ -1603,6 +1634,7 @@ export function renderDashboardHtml(): string {
           '<div class="flex flex-wrap items-center justify-between gap-2">' +
             '<div class="flex items-center gap-2">' +
               '<span class="text-lg font-black text-white">' + escapeHtml(data.symbol) + '</span>' +
+              dirBadge +
               '<span class="rounded-md border px-2 py-0.5 text-xs font-bold ' + (ok ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300' : 'border-rose-500/40 bg-rose-500/15 text-rose-300') + '">' + escapeHtml(r.criticRisk.verdict) + ' (' + escapeHtml(r.criticRisk.confidenceScore) + '/100)</span>' +
               '<span class="text-xs text-amber-300">' + escapeHtml(r.criticRisk.longTermStars?.label || "") + '</span>' +
             '</div>' +
@@ -1620,7 +1652,7 @@ export function renderDashboardHtml(): string {
           '</div>' +
           '<div class="overflow-hidden rounded-xl border border-slate-800"><img src="' + chartSrc + '" alt="15M Chart" class="block w-full h-auto" /></div>' +
           '<div class="flex flex-wrap gap-2">' +
-            '<button type="button" onclick="manualDemoBuy(\\'' + escapeHtml(data.symbol) + '\\', 100)" class="rounded-lg bg-emerald-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400">🛒 Demoda sotib olish ($100)</button>' +
+            '<button type="button" onclick="manualDemoBuy(\\'' + escapeHtml(data.symbol) + '\\', 100)" class="rounded-lg bg-emerald-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-emerald-400">' + demoBtnLabel + '</button>' +
             '<a href="' + tvUrl + '" target="_blank" rel="noopener" class="rounded-lg bg-sky-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-sky-400">📈 TradingView (MEXC 15M)</a>' +
           '</div>' +
           '</div>';

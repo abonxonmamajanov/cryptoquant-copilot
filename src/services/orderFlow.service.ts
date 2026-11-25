@@ -89,7 +89,7 @@ function computeWeightedObi(
   };
 }
 
-function findMajorBidWall(
+function findSpoofBidWall(
   book: MexcOrderBook,
   midPrice: number
 ): { price: number | null; usd: number } {
@@ -107,9 +107,80 @@ function findMajorBidWall(
     }
   }
 
-  // Fallback to largest bid in top 50 if all bids fell slightly outside -2%
   if (bestPrice === null && book.bids.length > 0) {
     for (const [price, qty] of book.bids.slice(0, 50)) {
+      const usd = price * qty;
+      if (usd > bestUsd) {
+        bestUsd = usd;
+        bestPrice = price;
+      }
+    }
+  }
+
+  return { price: bestPrice, usd: Math.round(bestUsd) };
+}
+
+function findSpoofAskWall(
+  book: MexcOrderBook,
+  midPrice: number
+): { price: number | null; usd: number } {
+  if (midPrice <= 0) return { price: null, usd: 0 };
+  const maxPrice = midPrice * 1.02; // within +2.0% of mid-price
+  let bestPrice: number | null = null;
+  let bestUsd = 0;
+
+  for (const [price, qty] of book.asks) {
+    if (price < midPrice || price > maxPrice) continue;
+    const usd = price * qty;
+    if (usd > bestUsd) {
+      bestUsd = usd;
+      bestPrice = price;
+    }
+  }
+
+  if (bestPrice === null && book.asks.length > 0) {
+    for (const [price, qty] of book.asks.slice(0, 50)) {
+      const usd = price * qty;
+      if (usd > bestUsd) {
+        bestUsd = usd;
+        bestPrice = price;
+      }
+    }
+  }
+
+  return { price: bestPrice, usd: Math.round(bestUsd) };
+}
+
+/**
+ * Stage 6.2 Liquidity Magnet for SHORT TP Snapping:
+ * Scans resting Bids between -1.2% and -6.0% below mid-price so SHORT TP1/TP2
+ * can snap 0.2% ABOVE a massive buyer wall before whales bounce price.
+ */
+function findMajorBidWall(
+  book: MexcOrderBook,
+  midPrice: number
+): { price: number | null; usd: number } {
+  if (midPrice <= 0) return { price: null, usd: 0 };
+  const maxTarget = midPrice * 0.988; // -1.2%
+  const minTarget = midPrice * 0.94; // -6.0%
+
+  let bestPrice: number | null = null;
+  let bestUsd = 0;
+
+  for (const [price, qty] of book.bids) {
+    if (price >= minTarget && price <= maxTarget) {
+      const usd = price * qty;
+      if (usd > bestUsd) {
+        bestUsd = usd;
+        bestPrice = price;
+      }
+    }
+  }
+
+  // Fallback for ultra-dense major books (e.g., BTC where 100 levels span < -1.2%)
+  if (bestPrice === null) {
+    for (const [price, qty] of book.bids) {
+      if (price >= midPrice) continue;
       const usd = price * qty;
       if (usd > bestUsd) {
         bestUsd = usd;
@@ -169,9 +240,21 @@ function measureBidLiquidityNearLevel(book: MexcOrderBook, targetPrice: number):
   return sumUsd;
 }
 
+function measureAskLiquidityNearLevel(book: MexcOrderBook, targetPrice: number): number {
+  const tolerance = targetPrice * 0.0008; // ±0.08% tick cluster
+  let sumUsd = 0;
+  for (const [price, qty] of book.asks) {
+    if (Math.abs(price - targetPrice) <= tolerance) {
+      sumUsd += price * qty;
+    }
+  }
+  return sumUsd;
+}
+
 export async function runOrderFlowAnalysis(
   rawSymbol: string,
-  enableSpoofCheck = true
+  enableSpoofCheck = true,
+  directionHint?: "LONG" | "SHORT"
 ): Promise<OrderFlowReport> {
   const symbol = rawSymbol.toUpperCase().trim();
   const started = Date.now();
@@ -187,6 +270,8 @@ export async function runOrderFlowAnalysis(
     const { weightedBidsUsd, weightedAsksUsd, weightedObiRatio } = computeWeightedObi(book1, midPrice);
     const majorBid = findMajorBidWall(book1, midPrice);
     const majorAsk = findMajorAskWall(book1, midPrice);
+    const spoofBid = findSpoofBidWall(book1, midPrice);
+    const spoofAsk = findSpoofAskWall(book1, midPrice);
 
     // 2. Real Executed Taker Buy/Sell CVD
     // isBuyerMaker === false -> aggressive Taker Buy (market buyer lifted the ask)
@@ -204,25 +289,38 @@ export async function runOrderFlowAnalysis(
       totalTakerUsd > 0 ? Number(((takerBuyUsd / totalTakerUsd) * 100).toFixed(1)) : 50;
     const cvdUsd = Math.round(takerBuyUsd - takerSellUsd);
 
-    // 3. Anti-Spoofing Wall Check (Snapshot 2 after 2.5s)
+    // 3. Dual-Direction Anti-Spoofing Wall Check (Snapshot 2 after 2.5s)
     let isSpoofingDetected = false;
     let spoofReasonUz: string | null = null;
     let spoofChecked = false;
 
-    if (enableSpoofCheck && majorBid.price !== null && majorBid.usd > 0) {
+    const canCheckBid = directionHint !== "SHORT" && spoofBid.price !== null && spoofBid.usd > 0;
+    const canCheckAsk = directionHint !== "LONG" && spoofAsk.price !== null && spoofAsk.usd > 0;
+
+    if (enableSpoofCheck && (canCheckBid || canCheckAsk)) {
       try {
         await sleep(SPOOF_WAIT_MS);
         const book2 = await fetchMexcOrderBook(symbol, 50);
         const midPrice2 = getMidPrice(book2);
         spoofChecked = true;
 
-        // Only flag spoofing if price did NOT drop through the bid wall (wall wasn't legitimately filled)
-        if (midPrice2 > majorBid.price) {
-          const remainingWallUsd = measureBidLiquidityNearLevel(book2, majorBid.price);
-          const shrinkRatio = majorBid.usd > 0 ? 1 - remainingWallUsd / majorBid.usd : 0;
+        // Check fake Bid wall (traps LONGs) if price did NOT drop through the bid wall
+        if (canCheckBid && spoofBid.price !== null && midPrice2 > spoofBid.price) {
+          const remainingBidUsd = measureBidLiquidityNearLevel(book2, spoofBid.price);
+          const shrinkRatio = spoofBid.usd > 0 ? 1 - remainingBidUsd / spoofBid.usd : 0;
           if (shrinkRatio >= SPOOF_SHRINK_THRESHOLD) {
             isSpoofingDetected = true;
-            spoofReasonUz = `Soxta xaridor devori (Spoofing) aniqlandi (@ ${majorBid.price}, -${Math.round(shrinkRatio * 100)}% yo'qoldi)`;
+            spoofReasonUz = `Soxta xaridor devori (Bid Spoofing) aniqlandi (@ ${spoofBid.price}, -${Math.round(shrinkRatio * 100)}% yo'qoldi)`;
+          }
+        }
+
+        // Check fake Ask wall (traps SHORTs) if price did NOT rise through the ask wall
+        if (!isSpoofingDetected && canCheckAsk && spoofAsk.price !== null && midPrice2 < spoofAsk.price) {
+          const remainingAskUsd = measureAskLiquidityNearLevel(book2, spoofAsk.price);
+          const shrinkRatio = spoofAsk.usd > 0 ? 1 - remainingAskUsd / spoofAsk.usd : 0;
+          if (shrinkRatio >= SPOOF_SHRINK_THRESHOLD) {
+            isSpoofingDetected = true;
+            spoofReasonUz = `Soxta sotuvchi devori (Ask Spoofing) aniqlandi (@ ${spoofAsk.price}, -${Math.round(shrinkRatio * 100)}% yo'qoldi)`;
           }
         }
       } catch {

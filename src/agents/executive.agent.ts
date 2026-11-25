@@ -93,22 +93,31 @@ export function formatTelegramSignalCard(
   const entryZone = formatEntryZoneRange(tech.entryPrice);
   const tradeMode = critic.tradeMode ?? tech.tradeMode ?? "INTRADAY";
   const modeHeader = tradeMode === "SWING" ? "🏔️ SWING (4H)" : "⚡ INTRADAY (15M)";
-  const tp1 = tech.tp1Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 0.6);
+  const isShort = tech.direction === "SHORT" || critic.direction === "SHORT";
+  const dirLabel = isShort
+    ? "🔴 *SHORT / SELL (1x — Xavfsiz Hedge / Nol likvidatsiya)*"
+    : "🟢 *LONG (SPOT)*";
+  const marketVenue = isShort ? "MEXC 1x Hedge" : "MEXC Spot";
+
+  const tp1 =
+    tech.tp1Price ??
+    roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 0.6);
   const tp2 = tech.tp2Price ?? tech.takeProfitPrice;
-  const tp3 = tech.tp3Price ?? roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.35);
+  const tp3 =
+    tech.tp3Price ??
+    roundPrice(tech.entryPrice + (tech.takeProfitPrice - tech.entryPrice) * 1.35);
   const starsText = critic.longTermStars ? ` | ${critic.longTermStars.label}` : "";
   const sizeMult = critic.suggestedSizeMultiplier ?? 1.0;
   const threeLineSummary = formatThreeLineAgentSummary(tech, macro, critic, fundamental, orderFlow);
 
   const lines = [
     `🚀 *CRYPTOQUANT-COPILOT SIGNAL* | ${modeHeader}`,
+    `${dirLabel}`,
     ``,
-    `🪙 *Juftlik:* \`${scout.symbol}\` (MEXC Spot)`,
-    `📊 *Yo'nalish:* LONG | *Ishonch:* ${critic.confidenceScore}/100${starsText}`,
-    `💰 *Tavsiya hajm:* ${sizeMult.toFixed(1)}x`,
+    `🪙 *Juftlik:* \`${scout.symbol}\` (${marketVenue})`,
+    `📊 *Ishonch:* ${critic.confidenceScore}/100${starsText} | 💰 *Tavsiya hajm:* ${sizeMult.toFixed(1)}x`,
     ``,
-    `🎯 *Kirish (Entry):* \`${tech.entryPrice}\``,
-    `📍 *Kirish zonasi (Entry Zone):* \`${entryZone}\``,
+    `🎯 *Kirish (Entry):* \`${tech.entryPrice}\` (Zona: \`${entryZone}\`)`,
     `✅ *TP1 (60% yopish):* \`${tp1}\``,
     `✅ *TP2 (40% asosiy):* \`${tp2}\``,
     `🚀 *TP3 (Max runner):* \`${tp3}\``,
@@ -125,12 +134,17 @@ export function formatTelegramSignalCard(
 }
 
 export function formatTp1BreakevenCard(trade: DemoTradeItem): string {
+  const dirTag = trade.direction === "SHORT" ? "🔴 SHORT 1x" : "🟢 LONG";
+  const trailNote =
+    trade.direction === "SHORT"
+      ? "-2.3R da -0.5R foyda himoyasiga tushadi"
+      : "2.3R da +0.5R ga ko'tariladi";
   return [
-    `🎯 *TP1 URILDI (${trade.symbol})* — 60% foyda olindi! Qolgan 40% SL \`${trade.stopLossPrice}\` (-0.2R yumshoq himoya) ga surildi!`,
+    `🎯 *TP1 URILDI (${trade.symbol} | ${dirTag})* — 60% foyda olindi! Qolgan 40% SL \`${trade.stopLossPrice}\` yumshoq himoyaga surildi!`,
     ``,
-    `🪙 *Juftlik:* \`${trade.symbol}\` (${trade.tradeMode})`,
+    `🪙 *Juftlik:* \`${trade.symbol}\` (${trade.tradeMode} • ${dirTag})`,
     `✅ *TP1 (60%):* \`${trade.tp1Price}\` | 🎯 *TP2 (40%):* \`${trade.tp2Price}\` | 🚀 *TP3:* \`${trade.tp3Price}\``,
-    `🛡️ *Yangi Stop-Loss:* \`${trade.stopLossPrice}\` (2.3R da +0.5R ga ko'tariladi)`
+    `🛡️ *Yangi Stop-Loss:* \`${trade.stopLossPrice}\` (${trailNote})`
   ].join("\n");
 }
 
@@ -149,7 +163,7 @@ export function formatTradeClosedCard(trade: DemoTradeItem): string {
     trade.status === "TP_HIT"
       ? "TAKE-PROFIT URILDI (TP_HIT)"
       : trade.status === "BREAKEVEN_EXIT"
-        ? "BREAKEVEN YOPILDI (0 ZARAR)"
+        ? "TP1 HIMOYA YOPILDI"
         : trade.status === "MANUAL_CLOSE"
           ? "QO'LDA YOPILDI (MANUAL_CLOSE)"
           : trade.status === "SL_HIT"
@@ -158,11 +172,12 @@ export function formatTradeClosedCard(trade: DemoTradeItem): string {
   const pnlPct = trade.pnlPercent ?? 0;
   const pnlUsd = trade.pnlUsd ?? 0;
   const sign = pnlUsd >= 0 ? "+" : "";
+  const dirTag = trade.direction === "SHORT" ? "SHORT 1x" : "LONG Spot";
 
   const lines = [
     `${icon} *DEMO SAVDO YOPILDI — ${label}*`,
     ``,
-    `🪙 *Juftlik:* \`${trade.symbol}\` (MEXC Spot | ${trade.tradeMode})`,
+    `🪙 *Juftlik:* \`${trade.symbol}\` (${dirTag} | ${trade.tradeMode})`,
     `🎯 *Entry:* \`${trade.entryPrice}\` → *Exit:* \`${trade.exitPrice ?? "-"}\``,
     `💰 *Natija:* ${sign}${pnlPct}% (${sign}$${pnlUsd})`,
     `📦 *Pozitsiya hajmi:* $${trade.positionSizeUsd}`
@@ -316,6 +331,7 @@ export async function runExecutiveAgent(
     const klines = await fetchMexcKlines(scout.symbol, "15m", 60);
     chartPng = generate15mChartPng(klines, {
       symbol: scout.symbol,
+      direction: tech.direction,
       entryPrice: tech.entryPrice,
       takeProfitPrice: tech.takeProfitPrice,
       stopLossPrice: tech.stopLossPrice,

@@ -2,10 +2,11 @@ import { fetchMexcKlines } from "../services/mexcClient.service";
 import { ScoutCandidate } from "./scout.agent";
 
 export type TradeMode = "INTRADAY" | "SWING";
+export type SignalDirection = "LONG" | "SHORT" | "SKIP";
 
 export interface TechnicalAnalysisResult {
   symbol: string;
-  direction: "LONG" | "SKIP";
+  direction: SignalDirection;
   tradeMode?: TradeMode;
   entryPrice: number;
   stopLossPrice: number;
@@ -21,15 +22,21 @@ export interface TechnicalAnalysisResult {
   ema21: number;
   ema50?: number;
   ema21Rising?: boolean;
+  ema21Falling?: boolean;
   stretchAboveEma21Pct?: number;
+  stretchBelowEma21Pct?: number;
   atrPct?: number;
   isBullishCandle?: boolean;
+  isBearishCandle?: boolean;
   isPullbackReclaim?: boolean;
+  isRallyRejection?: boolean;
   tpSnappedToAskWall?: boolean;
+  tpSnappedToBidWall?: boolean;
   atr14: number;
   supportLevel: number;
   support10Level?: number;
   resistanceLevel: number;
+  resistance10Level?: number;
   techScore: number;
   summary: string;
   latencyMs: number;
@@ -154,48 +161,157 @@ function roundPrice(price: number): number {
 }
 
 /**
- * Stage 6.1 Wall Street Asymmetric Exit Math + Strict SL/TP Mode Synchronizer & Ask-Wall Snapper.
- * - INTRADAY (15M): SL -1.6%..-2.5% | TP1=1.8R (60% close, SL -> -0.2R; -> +0.5R at 2.3R) | TP2=3.0R (40%) | TP3=4.0R
- * - SWING (4H):     SL -2.2%..-3.8% | TP1=2.0R (60% close, SL -> -0.2R; -> +0.5R at 2.3R) | TP2=3.4R (40%) | TP3=4.6R
- * Optionally snaps TP1 or TP2 0.2% below a major resting Ask wall while preserving
- * SL < Entry < TP1 < TP2 < TP3 and R:R >= 2.0.
+ * Stage 6.2 Dual-Direction Asymmetric Exit Math + Strict SL/TP Mode Synchronizer & Wall Snapper.
+ * - LONG:       SL < Entry < TP1 < TP2 < TP3 (snaps below majorAskWallPrice * 0.998)
+ * - SHORT (1x): SL > Entry > TP1 > TP2 > TP3 (snaps above majorBidWallPrice * 1.002)
  */
 export function recomputeLevelsForMode(
   tech: TechnicalAnalysisResult,
   mode: TradeMode,
-  majorAskWallPrice?: number | null
+  majorWallPrice?: number | null
 ): TechnicalAnalysisResult {
   const entryPrice = tech.entryPrice;
   const roundedEntry = roundPrice(entryPrice);
   const atr14 = Math.max(0, tech.atr14);
+
+  const mult1 = mode === "SWING" ? 2.0 : 1.8;
+  const mult2 = mode === "SWING" ? 3.4 : 3.0;
+  const mult3 = mode === "SWING" ? 4.6 : 4.0;
+
+  if (tech.direction === "SHORT") {
+    const resistance20 = tech.resistanceLevel > 0 ? tech.resistanceLevel : entryPrice * 1.02;
+    const resistance10 =
+      typeof tech.resistance10Level === "number" && tech.resistance10Level > 0
+        ? tech.resistance10Level
+        : resistance20;
+
+    let stopLossPrice: number;
+    if (mode === "SWING") {
+      // SWING SHORT strict bounds: +2.2% .. +3.8% above entry
+      const swingAtrStop = entryPrice + Math.max(atr14 * 2.2, entryPrice * 0.022);
+      const maxSwingCeil = entryPrice * 1.038;
+      const resStop = resistance20 * 1.005;
+      const rawStop = Math.min(maxSwingCeil, Math.max(swingAtrStop, resStop));
+      stopLossPrice = roundPrice(Math.max(rawStop, entryPrice * 1.022));
+    } else {
+      // INTRADAY SHORT strict bounds: +1.6% .. +2.5% above entry
+      const atrStop = entryPrice + Math.max(atr14 * 1.8, entryPrice * 0.016);
+      const maxIntradayCeil = entryPrice * 1.025;
+      const resStop = resistance10 * 1.004;
+      const rawStop = Math.min(maxIntradayCeil, Math.max(atrStop, resStop));
+      stopLossPrice = roundPrice(Math.max(rawStop, entryPrice * 1.016));
+    }
+
+    const riskPerUnit = Math.max(stopLossPrice - roundedEntry, roundedEntry * 0.008);
+    let tp1Price = roundPrice(Math.max(roundedEntry * 0.05, roundedEntry - riskPerUnit * mult1));
+    let tp2Price = roundPrice(
+      Math.max(roundedEntry * 0.03, Math.min(roundedEntry - riskPerUnit * mult2, tp1Price * 0.995))
+    );
+    const tp3Price = roundPrice(
+      Math.max(
+        roundedEntry * 0.01,
+        Math.min(
+          roundedEntry - riskPerUnit * mult3,
+          tp2Price - riskPerUnit * 0.8,
+          tp2Price * 0.992
+        )
+      )
+    );
+
+    // Bid-Wall Liquidity Magnet TP Snapping (0.2% ABOVE major resting buyer wall)
+    let tpSnappedToBidWall = false;
+    if (
+      typeof majorWallPrice === "number" &&
+      Number.isFinite(majorWallPrice) &&
+      majorWallPrice > 0 &&
+      majorWallPrice <= roundedEntry * 0.988
+    ) {
+      const snapPrice = roundPrice(majorWallPrice * 1.002);
+      if (snapPrice < tp1Price && snapPrice > tp2Price) {
+        const candidateRr = (roundedEntry - snapPrice) / riskPerUnit;
+        if (
+          candidateRr >= 2.0 &&
+          stopLossPrice > roundedEntry &&
+          roundedEntry > tp1Price &&
+          tp1Price > snapPrice &&
+          snapPrice > tp3Price
+        ) {
+          tp2Price = snapPrice;
+          tpSnappedToBidWall = true;
+        }
+      } else if (snapPrice <= roundedEntry - riskPerUnit * 1.4 && snapPrice > tp1Price) {
+        const tp2Rr = (roundedEntry - tp2Price) / riskPerUnit;
+        if (
+          tp2Rr >= 2.0 &&
+          stopLossPrice > roundedEntry &&
+          roundedEntry > snapPrice &&
+          snapPrice > tp2Price &&
+          tp2Price > tp3Price
+        ) {
+          tp1Price = snapPrice;
+          tpSnappedToBidWall = true;
+        }
+      }
+    }
+
+    const takeProfitPrice = tp2Price;
+
+    if (
+      !(
+        stopLossPrice > roundedEntry &&
+        roundedEntry > tp1Price &&
+        tp1Price > tp2Price &&
+        tp2Price > tp3Price
+      )
+    ) {
+      throw new Error(
+        `Invalid SHORT TP/SL ordering for ${tech.symbol}: SL=${stopLossPrice}, Entry=${roundedEntry}, TP1=${tp1Price}, TP2=${tp2Price}, TP3=${tp3Price}`
+      );
+    }
+
+    const riskRewardRatio = Number(((roundedEntry - takeProfitPrice) / riskPerUnit).toFixed(2));
+    const adxTag = typeof tech.adx14 === "number" ? `, ADX=${tech.adx14}` : "";
+    const summary = `${mode} SHORT (1x) EMA9<21<50${tech.isRallyRejection ? " (Rally-Rejection)" : ""}${tpSnappedToBidWall ? " [Bid-Wall TP]" : ""}, RSI=${tech.rsi14}${adxTag}, R:R=1:${riskRewardRatio}`;
+
+    return {
+      ...tech,
+      tradeMode: mode,
+      entryPrice: roundedEntry,
+      stopLossPrice,
+      takeProfitPrice,
+      tp1Price,
+      tp2Price,
+      tp3Price,
+      riskRewardRatio,
+      tpSnappedToAskWall: false,
+      tpSnappedToBidWall,
+      summary
+    };
+  }
+
+  // LONG (or SKIP preview) levels: SL < Entry < TP1 < TP2 < TP3
   const support20 = tech.supportLevel > 0 ? tech.supportLevel : entryPrice * 0.98;
   const support10 =
     typeof tech.support10Level === "number" && tech.support10Level > 0
       ? tech.support10Level
       : support20;
 
-  const mult1 = mode === "SWING" ? 2.0 : 1.8;
-  const mult2 = mode === "SWING" ? 3.4 : 3.0;
-  const mult3 = mode === "SWING" ? 4.6 : 4.0;
-
   let stopLossPrice: number;
   let riskPerUnit: number;
 
   if (mode === "SWING") {
-    // Stage 6.1 SWING strict bounds: -2.2% .. -3.8%
     const swingAtrStop = entryPrice - Math.max(atr14 * 2.2, entryPrice * 0.022);
-    const maxSwingFloor = entryPrice * 0.962; // strict -3.8% max risk
+    const maxSwingFloor = entryPrice * 0.962;
     const supportStop = support20 * 0.995;
     const rawStop = Math.max(maxSwingFloor, Math.min(swingAtrStop, supportStop));
-    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.978)); // strict -2.2% min risk
+    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.978));
     riskPerUnit = Math.max(roundedEntry - stopLossPrice, roundedEntry * 0.008);
   } else {
-    // Stage 6.1 INTRADAY strict bounds: -1.6% .. -2.5%
     const atrStop = entryPrice - Math.max(atr14 * 1.8, entryPrice * 0.016);
-    const maxIntradayFloor = entryPrice * 0.975; // strict -2.5% max risk
+    const maxIntradayFloor = entryPrice * 0.975;
     const supportStop = support10 * 0.996;
     const rawStop = Math.max(maxIntradayFloor, Math.min(atrStop, supportStop));
-    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.984)); // strict -1.6% min risk
+    stopLossPrice = roundPrice(Math.min(rawStop, entryPrice * 0.984));
     riskPerUnit = Math.max(roundedEntry - stopLossPrice, roundedEntry * 0.008);
   }
 
@@ -210,12 +326,11 @@ export function recomputeLevelsForMode(
   // Ask-Wall Liquidity Magnet TP Snapping (0.2% below major resting sell wall)
   let tpSnappedToAskWall = false;
   if (
-    typeof majorAskWallPrice === "number" &&
-    Number.isFinite(majorAskWallPrice) &&
-    majorAskWallPrice >= roundedEntry * 1.012
+    typeof majorWallPrice === "number" &&
+    Number.isFinite(majorWallPrice) &&
+    majorWallPrice >= roundedEntry * 1.012
   ) {
-    const snapPrice = roundPrice(majorAskWallPrice * 0.998);
-    // Prefer snapping TP2 if wall sits slightly below TP2 and R:R stays >= 2.0
+    const snapPrice = roundPrice(majorWallPrice * 0.998);
     if (snapPrice > tp1Price && snapPrice < tp2Price) {
       const candidateRr = (snapPrice - roundedEntry) / riskPerUnit;
       if (
@@ -229,7 +344,6 @@ export function recomputeLevelsForMode(
         tpSnappedToAskWall = true;
       }
     } else if (snapPrice >= roundedEntry + riskPerUnit * 1.4 && snapPrice < tp1Price) {
-      // Otherwise snap TP1 cleanly below a near-term sell wall while keeping TP1 >= 1.4R and TP2 R:R >= 2.0
       const tp2Rr = (tp2Price - roundedEntry) / riskPerUnit;
       if (
         tp2Rr >= 2.0 &&
@@ -277,6 +391,7 @@ export function recomputeLevelsForMode(
     tp3Price,
     riskRewardRatio,
     tpSnappedToAskWall,
+    tpSnappedToBidWall: false,
     summary
   };
 }
@@ -304,6 +419,7 @@ export async function runTechnicianAgent(
   const ema50 = ema50Series[lastIdx] ?? ema21;
   const ema21Prev3 = ema21Series[Math.max(0, lastIdx - 3)] ?? ema21;
   const ema21Rising = ema21 > ema21Prev3;
+  const ema21Falling = ema21 < ema21Prev3;
 
   // ATR(14)
   const trs: number[] = [];
@@ -325,25 +441,27 @@ export async function runTechnicianAgent(
   const supportLevel = Math.min(...recent20.map((k) => k.low));
   const support10 = Math.min(...recent10.map((k) => k.low));
   const resistanceLevel = Math.max(...recent20.map((k) => k.high));
+  const resistance10 = Math.max(...recent10.map((k) => k.high));
 
   const atrPct = entryPrice > 0 ? Number(((atr14 / entryPrice) * 100).toFixed(2)) : 0;
-  const tradeMode: TradeMode =
-    modeHint ??
-    (ema9 > ema21 * 1.003 && ema21 > ema50 && rsi14 >= 44 && rsi14 <= 60 && atrPct >= 0.4
-      ? "SWING"
-      : "INTRADAY");
 
-  // Stage 6.1 Pullback-Reclaim, ADX(14) & EMA50 Ribbon Structure Diagnostics
+  // Stage 6.2 Dual-Direction Structure Diagnostics
   const lastBar = closed[lastIdx];
   const prevBar = closed[Math.max(0, lastIdx - 1)];
   const stretchAboveEma21Pct =
     ema21 > 0 ? Number((((entryPrice - ema21) / ema21) * 100).toFixed(2)) : 0;
+  const stretchBelowEma21Pct =
+    ema21 > 0 ? Number((((ema21 - entryPrice) / ema21) * 100).toFixed(2)) : 0;
   const distAboveSupportPct = supportLevel > 0 ? ((entryPrice - supportLevel) / supportLevel) * 100 : 0;
+  const distBelowResPct = resistanceLevel > 0 ? ((resistanceLevel - entryPrice) / resistanceLevel) * 100 : 0;
   const distToEma9Pct = ema9 > 0 ? Math.abs((entryPrice - ema9) / ema9) * 100 : 0;
 
   const isBullishCandle = Boolean(lastBar && lastBar.close > lastBar.open);
+  const isBearishCandle = Boolean(lastBar && lastBar.close < lastBar.open);
+
+  // LONG Pullback-Reclaim check
   const recentDipLow = Math.min(lastBar?.low ?? entryPrice, prevBar?.low ?? entryPrice);
-  const touchedEmaZone = recentDipLow <= ema9 * 1.004 && recentDipLow >= ema50 * 0.995;
+  const touchedBullEmaZone = recentDipLow <= ema9 * 1.004 && recentDipLow >= ema50 * 0.995;
   const reclaimedAboveEma9 =
     Boolean(lastBar && lastBar.close > ema9 && lastBar.close > lastBar.open) &&
     entryPrice >= ema9 * 0.998;
@@ -351,35 +469,27 @@ export async function runTechnicianAgent(
     ema9 > ema21 &&
     ema21 > ema50 &&
     ema21Rising &&
-    touchedEmaZone &&
+    touchedBullEmaZone &&
     reclaimedAboveEma9 &&
     stretchAboveEma21Pct >= 0 &&
     stretchAboveEma21Pct <= 2.2;
 
-  let techScore = 25;
-  if (ema9 > ema21) techScore += 14;
-  if (ema21 > ema50) techScore += 12;
-  if (ema21Rising) techScore += 6;
-  if (isPullbackReclaim) techScore += 16;
+  // SHORT Rally-Rejection check (bounce into EMA9/50 resistance rejected lower)
+  const recentBounceHigh = Math.max(lastBar?.high ?? entryPrice, prevBar?.high ?? entryPrice);
+  const touchedBearEmaZone = recentBounceHigh >= ema9 * 0.996 && recentBounceHigh <= ema50 * 1.005;
+  const rejectedBelowEma9 =
+    Boolean(lastBar && lastBar.close < ema9 && lastBar.close < lastBar.open) &&
+    entryPrice <= ema9 * 1.002;
+  const isRallyRejection =
+    ema9 < ema21 &&
+    ema21 < ema50 &&
+    ema21Falling &&
+    touchedBearEmaZone &&
+    rejectedBelowEma9 &&
+    stretchBelowEma21Pct >= 0 &&
+    stretchBelowEma21Pct <= 2.2;
 
-  // Stage 6.0/6.1 Precision RSI sweet spot (42..60)
-  if (rsi14 >= 44 && rsi14 <= 60) techScore += 20;
-  else if (rsi14 >= 42 && rsi14 < 44) techScore += 12;
-  else if (rsi14 > 60 && rsi14 <= 65) techScore += 2;
-  else if (rsi14 > 65 || rsi14 < 38) techScore -= 18;
-
-  // Stage 6.1 ADX trend strength adjustment
-  if (adx14 >= 25) techScore += 4;
-  else if (isChoppyMarket) techScore -= 12;
-
-  if (distToEma9Pct <= 1.2 && stretchAboveEma21Pct <= 2.2) techScore += 8;
-  else if (stretchAboveEma21Pct > 2.2) techScore -= 16;
-
-  if (distAboveSupportPct <= 3.5) techScore += 4;
-  techScore += 6; // base asymmetric R:R >= 3.0 bonus
-  techScore = Math.max(0, Math.min(100, Math.round(techScore)));
-
-  // Strict LONG qualification: full bullish ribbon (EMA9 > EMA21 > EMA50), rising EMA21, reclaiming EMA9, RSI 42..60
+  // Strict LONG vs SHORT (1x) qualification
   const isBullishTrend =
     ema9 > ema21 &&
     ema21 > ema50 &&
@@ -387,8 +497,65 @@ export async function runTechnicianAgent(
     entryPrice >= ema9 * 0.998 &&
     rsi14 >= 42 &&
     rsi14 <= 60 &&
+    adx14 >= 20 &&
     stretchAboveEma21Pct <= 2.4;
-  const direction: "LONG" | "SKIP" = isBullishTrend ? "LONG" : "SKIP";
+
+  const isBearishTrend =
+    !isBullishTrend &&
+    ema9 < ema21 &&
+    ema21 < ema50 &&
+    ema21Falling &&
+    entryPrice <= ema9 * 1.002 &&
+    rsi14 >= 40 &&
+    rsi14 <= 58 &&
+    adx14 >= 20 &&
+    stretchBelowEma21Pct <= 2.4;
+
+  const direction: SignalDirection = isBullishTrend
+    ? "LONG"
+    : isBearishTrend
+      ? "SHORT"
+      : "SKIP";
+
+  const isBearishBias = ema9 < ema21;
+  let techScore = 25;
+  if (direction === "SHORT" || (direction === "SKIP" && isBearishBias)) {
+    if (ema9 < ema21) techScore += 14;
+    if (ema21 < ema50) techScore += 12;
+    if (ema21Falling) techScore += 6;
+    if (isRallyRejection) techScore += 16;
+    if (rsi14 >= 40 && rsi14 <= 56) techScore += 20;
+    else if (rsi14 > 56 && rsi14 <= 58) techScore += 12;
+    else if (rsi14 < 40 || rsi14 > 65) techScore -= 18;
+    if (adx14 >= 25) techScore += 4;
+    else if (isChoppyMarket) techScore -= 12;
+    if (distToEma9Pct <= 1.2 && stretchBelowEma21Pct <= 2.2) techScore += 8;
+    else if (stretchBelowEma21Pct > 2.2) techScore -= 16;
+    if (distBelowResPct <= 3.5) techScore += 4;
+    techScore += 6;
+  } else {
+    if (ema9 > ema21) techScore += 14;
+    if (ema21 > ema50) techScore += 12;
+    if (ema21Rising) techScore += 6;
+    if (isPullbackReclaim) techScore += 16;
+    if (rsi14 >= 44 && rsi14 <= 60) techScore += 20;
+    else if (rsi14 >= 42 && rsi14 < 44) techScore += 12;
+    else if (rsi14 > 60 && rsi14 <= 65) techScore += 2;
+    else if (rsi14 > 65 || rsi14 < 38) techScore -= 18;
+    if (adx14 >= 25) techScore += 4;
+    else if (isChoppyMarket) techScore -= 12;
+    if (distToEma9Pct <= 1.2 && stretchAboveEma21Pct <= 2.2) techScore += 8;
+    else if (stretchAboveEma21Pct > 2.2) techScore -= 16;
+    if (distAboveSupportPct <= 3.5) techScore += 4;
+    techScore += 6;
+  }
+  techScore = Math.max(0, Math.min(100, Math.round(techScore)));
+
+  const isSwingTech =
+    direction === "SHORT"
+      ? ema9 < ema21 * 0.997 && ema21 < ema50 && rsi14 >= 40 && rsi14 <= 56 && atrPct >= 0.4
+      : ema9 > ema21 * 1.003 && ema21 > ema50 && rsi14 >= 44 && rsi14 <= 60 && atrPct >= 0.4;
+  const tradeMode: TradeMode = modeHint ?? (isSwingTech ? "SWING" : "INTRADAY");
 
   const baseResult: TechnicalAnalysisResult = {
     symbol: candidate.symbol,
@@ -405,15 +572,21 @@ export async function runTechnicianAgent(
     ema21: roundPrice(ema21),
     ema50: roundPrice(ema50),
     ema21Rising,
+    ema21Falling,
     stretchAboveEma21Pct,
+    stretchBelowEma21Pct,
     atrPct,
     isBullishCandle,
+    isBearishCandle,
     isPullbackReclaim,
+    isRallyRejection,
     tpSnappedToAskWall: false,
+    tpSnappedToBidWall: false,
     atr14: roundPrice(atr14),
     supportLevel: roundPrice(supportLevel),
     support10Level: roundPrice(support10),
     resistanceLevel: roundPrice(resistanceLevel),
+    resistance10Level: roundPrice(resistance10),
     techScore,
     summary: `Texnik tuzilma zaif (RSI=${rsi14}, ADX=${adx14}, EMA9=${roundPrice(ema9)} / EMA21=${roundPrice(ema21)} / EMA50=${roundPrice(ema50)})`,
     latencyMs: Date.now() - started

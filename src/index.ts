@@ -23,8 +23,11 @@ import {
 import { generatePortfolioPdfBuffer } from "./services/pdfReport.service";
 import { sendTelegramPdfReport } from "./agents/executive.agent";
 import {
+  DirectionFilter,
+  getActiveDirectionFilter,
   getSubscriberCount,
   LEGAL_DISCLAIMER_UZ,
+  setActiveDirectionFilter,
   SUBSCRIPTION_PLANS
 } from "./services/subscription.service";
 import {
@@ -94,16 +97,21 @@ app.get("/health", (_req, res) => {
   const wallStreetCircuitBreaker = getWallStreetCircuitBreakerStatus();
   res.status(200).json({
     service: "cryptoquant-copilot",
-    stage: "stage-6.1-wallstreet-exit-adx",
+    stage: "stage-6.2-dual-direction-1x-short",
     status: "ok",
+    activeDirectionFilter: getActiveDirectionFilter(),
     telegramBotRunning: isTelegramBotRunning(),
     subscribersCount: getSubscriberCount(),
     scheduler: getSchedulerStats(),
     wallStreetCircuitBreaker,
     signalTracker: {
       activeCount: tracker.activeCount,
+      activeLongCount: tracker.activeLongCount,
+      activeShortCount: tracker.activeShortCount,
       atRiskActiveCount: tracker.atRiskActiveCount,
       closedCount: tracker.closedCount,
+      longClosedCount: tracker.longClosedCount,
+      shortClosedCount: tracker.shortClosedCount,
       tpCount: tracker.tpCount,
       beCount: tracker.beCount,
       slCount: tracker.slCount,
@@ -121,6 +129,20 @@ app.get("/health", (_req, res) => {
     },
     timestamp: new Date().toISOString()
   });
+});
+
+app.get("/api/settings/direction", (_req, res) => {
+  res.status(200).json({ directionFilter: getActiveDirectionFilter() });
+});
+
+app.post("/api/settings/direction", (req, res) => {
+  const raw = String(req.body?.direction || req.body?.directionFilter || "").trim().toUpperCase();
+  if (raw !== "BOTH" && raw !== "LONG" && raw !== "SHORT") {
+    res.status(400).json({ ok: false, error: "Noto'g'ri yo'nalish (BOTH | LONG | SHORT)." });
+    return;
+  }
+  const updated = setActiveDirectionFilter(raw as DirectionFilter);
+  res.status(200).json({ ok: true, directionFilter: updated });
 });
 
 app.get("/health/markets", async (_req, res) => {
@@ -293,6 +315,7 @@ async function handleTokenChartRoute(
       const klines1h = await fetchMexcKlines(analysis.symbol, "1h", 60);
       png = generate15mChartPng(klines1h, {
         symbol: analysis.symbol,
+        direction: analysis.record.technician.direction,
         entryPrice: analysis.record.technician.entryPrice,
         takeProfitPrice: analysis.record.technician.takeProfitPrice,
         stopLossPrice: analysis.record.technician.stopLossPrice,

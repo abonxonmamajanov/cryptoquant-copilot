@@ -15,6 +15,7 @@ export type TrackedSignalOutcome =
 export interface TrackedSignalItem {
   id: string;
   symbol: string;
+  direction: "LONG" | "SHORT";
   tradeMode: "INTRADAY" | "SWING";
   entryPrice: number;
   tp1Price: number;
@@ -83,8 +84,12 @@ interface ArchivedSignalTotals {
 
 export interface SignalTrackerSummary {
   activeCount: number;
+  activeLongCount: number;
+  activeShortCount: number;
   atRiskActiveCount: number;
   closedCount: number;
+  longClosedCount: number;
+  shortClosedCount: number;
   winsCount: number;
   tpCount: number;
   beCount: number;
@@ -115,8 +120,8 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_HISTORY_RETAINED = 500;
 const BRAND_MOTTO = "Tez foyda emas — doimiy xotirjam, aniq savdo";
 
-// Stage 6.1 Wall Street Asymmetric Partial Take-Profit allocation:
-// 60% booked at TP1 (remaining 40% SL -> -0.2R soft protection; -> +0.5R at 2.3R), 40% booked at TP2
+// Stage 6.1/6.2 Wall Street Asymmetric Partial Take-Profit allocation:
+// 60% booked at TP1, remaining 40% booked at TP2
 const TP1_WEIGHT = 0.6;
 const TP2_WEIGHT = 0.4;
 
@@ -159,16 +164,20 @@ function formatTashkentTime(iso: string): string {
   return `${dd}.${mm} ${hh}:${min} (Toshkent)`;
 }
 
-function pctDiff(entry: number, target: number): number {
+function dirPctDiff(direction: "LONG" | "SHORT", entry: number, target: number): number {
   if (!Number.isFinite(entry) || entry <= 0) return 0;
-  return ((target - entry) / entry) * 100;
+  return direction === "SHORT"
+    ? ((entry - target) / entry) * 100
+    : ((target - entry) / entry) * 100;
 }
 
 function normalizeTrackedItem(raw: Partial<TrackedSignalItem>): TrackedSignalItem {
   const finalPnl = typeof raw.finalPnlPct === "number" ? raw.finalPnlPct : null;
+  const direction: "LONG" | "SHORT" = raw.direction === "SHORT" ? "SHORT" : "LONG";
   return {
     id: String(raw.id ?? `sig_${Date.now()}`),
     symbol: String(raw.symbol ?? ""),
+    direction,
     tradeMode: raw.tradeMode === "SWING" ? "SWING" : "INTRADAY",
     entryPrice: Number(raw.entryPrice ?? 0),
     tp1Price: Number(raw.tp1Price ?? 0),
@@ -249,7 +258,6 @@ export function hasActiveSignal(symbol: string): boolean {
 }
 
 export function getAtRiskActiveCount(): number {
-  // Signals that already hit TP1 have SL moved to Breakeven (risk-free)
   return state.active.filter((s) => !s.tp1Hit).length;
 }
 
@@ -257,23 +265,28 @@ export function registerDispatchedSignal(
   record: EvaluatedSignalRecord,
   telegramMessageId: number | null = null
 ): TrackedSignalItem {
-  // Replace any older active tracker for the same symbol to avoid duplicate alerts
   state.active = state.active.filter((s) => s.symbol !== record.scout.symbol);
 
+  const direction: "LONG" | "SHORT" =
+    record.technician.direction === "SHORT" || record.criticRisk.direction === "SHORT"
+      ? "SHORT"
+      : "LONG";
   const entry = record.technician.entryPrice;
   const tp2 = record.technician.tp2Price ?? record.technician.takeProfitPrice;
-  const risk = Math.max(entry - record.technician.stopLossPrice, entry * 0.008);
+  const risk = Math.max(Math.abs(entry - record.technician.stopLossPrice), entry * 0.008);
   const tradeMode = record.criticRisk.tradeMode ?? "INTRADAY";
+  const signDir = direction === "SHORT" ? -1 : 1;
   const tp1 =
     record.technician.tp1Price ??
-    roundTrackerPrice(entry + risk * (tradeMode === "SWING" ? 2.0 : 1.8));
+    roundTrackerPrice(entry + signDir * risk * (tradeMode === "SWING" ? 2.0 : 1.8));
   const tp3 =
     record.technician.tp3Price ??
-    roundTrackerPrice(entry + risk * (tradeMode === "SWING" ? 4.6 : 4.0));
+    roundTrackerPrice(entry + signDir * risk * (tradeMode === "SWING" ? 4.6 : 4.0));
 
   const item: TrackedSignalItem = {
     id: `sig_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     symbol: record.scout.symbol,
+    direction,
     tradeMode,
     entryPrice: entry,
     tp1Price: tp1,
@@ -313,39 +326,56 @@ export function evaluateTrackedSignals(
       continue;
     }
 
-    const pnlPct = Number(pctDiff(sig.entryPrice, live).toFixed(2));
-    const tp1Pct = pctDiff(sig.entryPrice, sig.tp1Price);
-    const tp2Pct = pctDiff(sig.entryPrice, sig.tp2Price);
-    const tp3Pct = pctDiff(sig.entryPrice, sig.tp3Price);
-    const risk = Math.max(sig.entryPrice - sig.initialStopLossPrice, sig.entryPrice * 0.008);
-    const softProtectionSl = roundTrackerPrice(sig.entryPrice - risk * 0.2); // -0.2R soft protection
-    const trailTriggerPrice = sig.entryPrice + risk * 2.3; // +2.3R trail step-up
-    const trailStep2Sl = roundTrackerPrice(sig.entryPrice + risk * 0.5); // +0.5R profit lock
+    const isShort = sig.direction === "SHORT";
+    const dirLabel = isShort ? "SHORT 1x" : "LONG";
+    const pnlPct = Number(dirPctDiff(sig.direction, sig.entryPrice, live).toFixed(2));
+    const tp1Pct = dirPctDiff(sig.direction, sig.entryPrice, sig.tp1Price);
+    const tp2Pct = dirPctDiff(sig.direction, sig.entryPrice, sig.tp2Price);
+    const tp3Pct = dirPctDiff(sig.direction, sig.entryPrice, sig.tp3Price);
+    const risk = Math.max(Math.abs(sig.entryPrice - sig.initialStopLossPrice), sig.entryPrice * 0.008);
+
+    // LONG: softSL = entry - 0.2R, trigger = entry + 2.3R, trailSL = entry + 0.5R
+    // SHORT: softSL = entry + 0.2R, trigger = entry - 2.3R, trailSL = entry - 0.5R
+    const softProtectionSl = isShort
+      ? roundTrackerPrice(sig.entryPrice + risk * 0.2)
+      : roundTrackerPrice(sig.entryPrice - risk * 0.2);
+    const trailTriggerPrice = isShort
+      ? sig.entryPrice - risk * 2.3
+      : sig.entryPrice + risk * 2.3;
+    const trailStep2Sl = isShort
+      ? roundTrackerPrice(sig.entryPrice - risk * 0.5)
+      : roundTrackerPrice(sig.entryPrice + risk * 0.5);
+
+    const hitTp2 = isShort ? live <= sig.tp2Price : live >= sig.tp2Price;
+    const hitTp3 = isShort ? live <= sig.tp3Price : live >= sig.tp3Price;
+    const hitTp1 = isShort ? live <= sig.tp1Price : live >= sig.tp1Price;
+    const hitTrailTrigger = isShort ? live <= trailTriggerPrice : live >= trailTriggerPrice;
+    const hitSl = isShort ? live >= sig.stopLossPrice : live <= sig.stopLossPrice;
+
     const tashkentSentTime = formatTashkentTime(sig.sentAt);
 
-    // 1. Check TP2 / TP3 (Full 60/40 Win & Close — remaining 40% booked at TP2)
-    if (live >= sig.tp2Price) {
+    // 1. Check TP2 / TP3 (Full 60/40 Win & Close)
+    if (hitTp2) {
       sig.tp1Hit = true;
       sig.tp2Hit = true;
-      const reachedTp3 = live >= sig.tp3Price;
-      sig.tp3Hit = reachedTp3;
-      sig.status = reachedTp3 ? "TP3_HIT" : "TP2_HIT";
+      sig.tp3Hit = hitTp3;
+      sig.status = hitTp3 ? "TP3_HIT" : "TP2_HIT";
       sig.closedAt = new Date(now).toISOString();
       const weightedPnl = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * tp2Pct).toFixed(2));
       sig.finalPnlPct = weightedPnl;
-      sig.runnerPnlPct = Number((reachedTp3 ? tp3Pct : tp2Pct).toFixed(2));
+      sig.runnerPnlPct = Number((hitTp3 ? tp3Pct : tp2Pct).toFixed(2));
       state.history.unshift(sig);
       changed = true;
       alerts.push({
         signal: sig,
-        eventType: reachedTp3 ? "TP3_HIT" : "TP2_HIT",
+        eventType: hitTp3 ? "TP3_HIT" : "TP2_HIT",
         livePrice: live,
         pnlPct: sig.finalPnlPct,
         replyToMessageId: sig.telegramMessageId,
         telegramText: [
-          reachedTp3
-            ? `🚀 *SIGNAL NATIJASI: ${sig.symbol} — TP2/TP3 TO'LIQ YOPILDI!*`
-            : `✅ *SIGNAL NATIJASI: ${sig.symbol} — TP2 (TO'LIQ FOYDA) URILDI!*`,
+          hitTp3
+            ? `🚀 *SIGNAL NATIJASI: ${sig.symbol} (${dirLabel}) — TP2/TP3 TO'LIQ YOPILDI!*`
+            : `✅ *SIGNAL NATIJASI: ${sig.symbol} (${dirLabel}) — TP2 (TO'LIQ FOYDA) URILDI!*`,
           ``,
           `🕒 Signal vaqti: \`${tashkentSentTime}\``,
           `🎯 Kirish: \`${sig.entryPrice}\` → TP2: \`${sig.tp2Price}\``,
@@ -356,10 +386,10 @@ export function evaluateTrackedSignals(
       continue;
     }
 
-    // 2. Check TP1 (Milestone Alert + Lock 60% + Move remaining 40% SL to -0.2R soft protection, or +0.5R if >= 2.3R)
-    if (!sig.tp1Hit && live >= sig.tp1Price) {
+    // 2. Check TP1 (Lock 60% + Move remaining 40% SL to soft protection)
+    if (!sig.tp1Hit && hitTp1) {
       sig.tp1Hit = true;
-      if (live >= trailTriggerPrice) {
+      if (hitTrailTrigger) {
         sig.trailingStep2Active = true;
         sig.stopLossPrice = trailStep2Sl;
       } else {
@@ -369,8 +399,8 @@ export function evaluateTrackedSignals(
       changed = true;
       const tp1Rounded = Number(tp1Pct.toFixed(2));
       const slModeLabel = sig.trailingStep2Active
-        ? `+0.5R (\`${sig.stopLossPrice}\`) foyda himoyasiga`
-        : `-0.2R (\`${sig.stopLossPrice}\`) yumshoq himoyaga (2.3R da +0.5R)`;
+        ? `+0.5R foyda himoyasiga (\`${sig.stopLossPrice}\`)`
+        : `0.2R yumshoq himoyaga (\`${sig.stopLossPrice}\`)`;
       alerts.push({
         signal: sig,
         eventType: "TP1_HIT",
@@ -378,7 +408,7 @@ export function evaluateTrackedSignals(
         pnlPct: tp1Rounded,
         replyToMessageId: sig.telegramMessageId,
         telegramText: [
-          `🎯 *SIGNAL NATIJASI: ${sig.symbol} — 1-TP (TP1) OLINDI!*`,
+          `🎯 *SIGNAL NATIJASI: ${sig.symbol} (${dirLabel}) — 1-TP (TP1) OLINDI!*`,
           ``,
           `🕒 Signal vaqti: \`${tashkentSentTime}\``,
           `🎯 Kirish: \`${sig.entryPrice}\` → TP1: \`${sig.tp1Price}\``,
@@ -390,8 +420,8 @@ export function evaluateTrackedSignals(
       continue;
     }
 
-    // 2b. Once TP1 is hit and price crosses +2.3R, upgrade remaining 40% SL from -0.2R to +0.5R
-    if (sig.tp1Hit && !sig.trailingStep2Active && live >= trailTriggerPrice) {
+    // 2b. Once TP1 is hit and price crosses 2.3R in favor, upgrade remaining 40% SL to +0.5R profit lock
+    if (sig.tp1Hit && !sig.trailingStep2Active && hitTrailTrigger) {
       sig.trailingStep2Active = true;
       sig.stopLossPrice = trailStep2Sl;
       changed = true;
@@ -399,14 +429,13 @@ export function evaluateTrackedSignals(
       continue;
     }
 
-    // 3. Check SL / Soft-Protection (-0.2R) / +0.5R Trail Exit
-    if (live <= sig.stopLossPrice) {
+    // 3. Check SL / Soft-Protection / +0.5R Trail Exit
+    if (hitSl) {
       sig.closedAt = new Date(now).toISOString();
-      const rawSlPnl = Number(pctDiff(sig.entryPrice, sig.stopLossPrice).toFixed(2));
+      const rawSlPnl = Number(dirPctDiff(sig.direction, sig.entryPrice, sig.stopLossPrice).toFixed(2));
       sig.runnerPnlPct = rawSlPnl;
 
       if (sig.tp1Hit) {
-        // 60% booked at TP1, remaining 40% closed at -0.2R soft SL or +0.5R trail SL
         const weightedPnl = Number((TP1_WEIGHT * tp1Pct + TP2_WEIGHT * rawSlPnl).toFixed(2));
         sig.finalPnlPct = weightedPnl;
         sig.status = weightedPnl > 0 ? "TP1_HIT" : "BREAKEVEN";
@@ -415,7 +444,7 @@ export function evaluateTrackedSignals(
         const winSign = weightedPnl >= 0 ? "+" : "";
         const exitDesc = sig.trailingStep2Active
           ? "+0.5R TRAILING FOYDA"
-          : "TP1 60% FOYDA + -0.2R HIMOYA";
+          : "TP1 60% FOYDA + HIMOYA";
         alerts.push({
           signal: sig,
           eventType: sig.status === "TP1_HIT" ? "TP1_HIT" : "BREAKEVEN",
@@ -423,7 +452,7 @@ export function evaluateTrackedSignals(
           pnlPct: sig.finalPnlPct,
           replyToMessageId: sig.telegramMessageId,
           telegramText: [
-            `✅ *SIGNAL NATIJASI: ${sig.symbol} — FOYDA BILAN YOPILDI (${exitDesc})*`,
+            `✅ *SIGNAL NATIJASI: ${sig.symbol} (${dirLabel}) — FOYDA BILAN YOPILDI (${exitDesc})*`,
             ``,
             `🕒 Signal vaqti: \`${tashkentSentTime}\``,
             `🎯 Kirish: \`${sig.entryPrice}\` → Qolgan 40% yopilish: \`${sig.stopLossPrice}\``,
@@ -446,7 +475,7 @@ export function evaluateTrackedSignals(
         pnlPct: sig.finalPnlPct,
         replyToMessageId: sig.telegramMessageId,
         telegramText: [
-          `🛑 *SIGNAL NATIJASI: ${sig.symbol} — STOP-LOSS (SL) OLINDI*`,
+          `🛑 *SIGNAL NATIJASI: ${sig.symbol} (${dirLabel}) — STOP-LOSS (SL) OLINDI*`,
           ``,
           `🕒 Signal vaqti: \`${tashkentSentTime}\``,
           `🎯 Kirish: \`${sig.entryPrice}\` → SL: \`${sig.stopLossPrice}\``,
@@ -478,7 +507,7 @@ export function evaluateTrackedSignals(
         pnlPct: sig.finalPnlPct,
         replyToMessageId: sig.telegramMessageId,
         telegramText: [
-          `⌛ *SIGNAL MUDDATI TUGADI: ${sig.symbol}*`,
+          `⌛ *SIGNAL MUDDATI TUGADI: ${sig.symbol} (${dirLabel})*`,
           ``,
           `🕒 Signal vaqti: \`${tashkentSentTime}\``,
           `🎯 Kirish: \`${sig.entryPrice}\` → Hozirgi: \`${live}\` (${expSign}${sig.finalPnlPct}%)`,
@@ -537,12 +566,11 @@ export function get24hSignalReport(now = Date.now()): Signal24hReport {
       if (s.finalPnlPct !== null) {
         pnl = s.finalPnlPct;
       } else {
-        const tp1P = pctDiff(s.entryPrice, s.tp1Price);
-        const tp2P = pctDiff(s.entryPrice, s.tp2Price);
+        const tp1P = dirPctDiff(s.direction, s.entryPrice, s.tp1Price);
+        const tp2P = dirPctDiff(s.direction, s.entryPrice, s.tp2Price);
         pnl = Number((s.tp2Hit ? TP1_WEIGHT * tp1P + TP2_WEIGHT * tp2P : TP1_WEIGHT * tp1P).toFixed(2));
       }
     } else {
-      // EXPIRED
       if (pnl > 0) {
         bucket = "TP";
         tpCount++;
@@ -708,6 +736,11 @@ export function getSignalTrackerSummary(now = Date.now()): SignalTrackerSummary 
     if (dd > maxDd) maxDd = dd;
   }
 
+  const activeLongCount = state.active.filter((s) => s.direction !== "SHORT").length;
+  const activeShortCount = state.active.filter((s) => s.direction === "SHORT").length;
+  const longClosedCount = closed.filter((s) => s.direction !== "SHORT").length;
+  const shortClosedCount = closed.filter((s) => s.direction === "SHORT").length;
+
   const closedCount = closed.length + a.closedCount;
   const signalWinRatePct = closedCount > 0 ? Number(((winsCount / closedCount) * 100).toFixed(1)) : 0;
   const accuracyPct = closedCount > 0 ? Number((((tpCount + beCount) / closedCount) * 100).toFixed(1)) : 0;
@@ -722,8 +755,12 @@ export function getSignalTrackerSummary(now = Date.now()): SignalTrackerSummary 
 
   return {
     activeCount: state.active.length,
+    activeLongCount,
+    activeShortCount,
     atRiskActiveCount: getAtRiskActiveCount(),
     closedCount,
+    longClosedCount,
+    shortClosedCount,
     winsCount,
     tpCount,
     beCount,
@@ -757,7 +794,7 @@ export function formatAllTimeTrackerTelegramText(now = Date.now()): string {
 
   const lines = [
     `🏆 *UMUMIY SIGNAL TRACKER NATIJALARI (BARCHA VAQT)*`,
-    `• *Jami yopilgan:* ${s.closedCount} ta | *Faol:* ${s.activeCount} ta (Risk ostida: ${s.atRiskActiveCount})`,
+    `• *Jami yopilgan:* ${s.closedCount} ta (🟢 ${s.longClosedCount} LONG / 🔴 ${s.shortClosedCount} SHORT 1x) | *Faol:* ${s.activeCount} ta`,
     `• *Taqsimot:* ✅ ${s.tpCount} TP | ⚖️ ${s.beCount} BE | 🛑 ${s.slCount} SL`,
     `• *Aniqlik (TP+BE):* ${s.accuracyPct}% | *Profit Factor:* ${s.profitFactor}`,
     `• *Umumiy Sof Natija:* *${sign}${s.totalNetPnlPct}%* (O'rtacha: ${avgSign}${s.avgPnlPct}% | MaxDD: -${s.maxDrawdownPct}%)`,

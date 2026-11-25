@@ -4,6 +4,7 @@ import {
   getActiveMexcMirror,
   MexcTicker24h
 } from "../services/mexcClient.service";
+import { getActiveDirectionFilter } from "../services/subscription.service";
 
 const STABLECOIN_BASES = new Set([
   "USDT", "USDC", "FDUSD", "TUSD", "DAI", "USDD", "USDP", "BUSD",
@@ -70,27 +71,32 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
-function computePreRankScore(ticker: MexcTicker24h): number {
+function computePreRankScore(ticker: MexcTicker24h, dirFilter: "BOTH" | "LONG" | "SHORT"): number {
   const chg = ticker.priceChangePercent;
   const liqWeight = Math.log10(Math.max(ticker.quoteVolume, 10));
-  let moveScore = 0;
 
-  if (chg >= 0.5 && chg <= 12) {
-    // Sweet spot: constructive uptrend / pullback-ready zone (not overextended)
-    moveScore = 20 + (10 - Math.abs(chg - 4.5));
-  } else if (chg >= -2 && chg < 0.5) {
-    // Quiet accumulation / early base reclaim
-    moveScore = 12 + (chg + 2) * 2.5;
-  } else if (chg > 12 && chg <= 18) {
-    // Mid-trend continuation (more cautious)
-    moveScore = 9;
-  } else if (chg > 18) {
-    // Penalize late overextended FOMO pumps
-    moveScore = Math.max(0.5, 4 - (chg - 18) * 0.35);
-  } else if (chg >= -6) {
-    moveScore = 4;
+  const scoreDirectionalMove = (directionalChg: number): number => {
+    if (directionalChg >= 0.5 && directionalChg <= 12) {
+      return 20 + (10 - Math.abs(directionalChg - 4.5));
+    } else if (directionalChg >= -2 && directionalChg < 0.5) {
+      return 12 + (directionalChg + 2) * 2.5;
+    } else if (directionalChg > 12 && directionalChg <= 18) {
+      return 9;
+    } else if (directionalChg > 18) {
+      return Math.max(0.5, 4 - (directionalChg - 18) * 0.35);
+    } else if (directionalChg >= -6) {
+      return 4;
+    }
+    return 0.5;
+  };
+
+  let moveScore = 0;
+  if (dirFilter === "LONG") {
+    moveScore = scoreDirectionalMove(chg);
+  } else if (dirFilter === "SHORT") {
+    moveScore = scoreDirectionalMove(-chg);
   } else {
-    moveScore = 0.5;
+    moveScore = Math.max(scoreDirectionalMove(chg), scoreDirectionalMove(-chg));
   }
 
   return moveScore * liqWeight;
@@ -120,6 +126,7 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
   const started = Date.now();
   const allTickers = preloadedTickers ?? (await fetchMexcTickers24h());
   const usdtTickers = allTickers.filter((t) => t.symbol.endsWith("USDT"));
+  const dirFilter = getActiveDirectionFilter();
 
   const eligible: MexcTicker24h[] = [];
   let filteredOutCount = 0;
@@ -132,9 +139,9 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
     eligible.push(t);
   }
 
-  // Pre-rank favoring liquid constructive uptrends & pullback-ready pairs (+0.5%..+12%) with >= $3M liquidity
+  // Stage 6.2 Dual-Direction pre-ranking: liquid controlled uptrends (+0.5..+12%) & controlled downtrends (-12..-0.5%)
   const preRanked = [...eligible]
-    .sort((a, b) => computePreRankScore(b) - computePreRankScore(a))
+    .sort((a, b) => computePreRankScore(b, dirFilter) - computePreRankScore(a, dirFilter))
     .slice(0, MAX_CANDIDATES_TO_DEEP_SCAN);
 
   const now = Date.now();
@@ -158,44 +165,44 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
           : 0;
 
       const priceChange24hPct = Number(ticker.priceChangePercent.toFixed(2));
+      const isBearCandidate = priceChange24hPct < -0.5;
+      const dirChg = isBearCandidate ? -priceChange24hPct : priceChange24hPct;
+      const dirMom = isBearCandidate ? -momentum15mPct : momentum15mPct;
 
-      // Stage 5.9 Quant Discipline Scout Score (0-100): reward liquid controlled trends, penalize blow-off spikes
+      // Stage 6.2 Dual-Direction Quant Discipline Scout Score (0-100)
       let volPoints = 0;
       if (volumeSpikeRatio15m >= 1.1 && volumeSpikeRatio15m <= 3.5) {
         volPoints = clamp(24 + (volumeSpikeRatio15m - 1.1) * 5.5, 24, 36);
       } else if (volumeSpikeRatio15m > 3.5 && volumeSpikeRatio15m <= 5.5) {
         volPoints = 22;
       } else if (volumeSpikeRatio15m > 5.5) {
-        // Blow-off volume spike often precedes exhaustion pullback
         volPoints = clamp(16 - (volumeSpikeRatio15m - 5.5) * 2.0, 4, 16);
       } else {
         volPoints = clamp(volumeSpikeRatio15m * 18, 6, 20);
       }
 
       let breakoutPoints = 0;
-      if (priceChange24hPct >= 0.5 && priceChange24hPct <= 12) {
+      if (dirChg >= 0.5 && dirChg <= 12) {
         breakoutPoints = 26;
-      } else if (priceChange24hPct >= -2 && priceChange24hPct < 0.5) {
+      } else if (dirChg >= -2 && dirChg < 0.5) {
         breakoutPoints = 16;
-      } else if (priceChange24hPct > 12 && priceChange24hPct <= 18) {
+      } else if (dirChg > 12 && dirChg <= 18) {
         breakoutPoints = 8;
-      } else if (priceChange24hPct > 18) {
-        // Penalize late overextended FOMO pumps
-        breakoutPoints = -20 - Math.min(18, (priceChange24hPct - 18) * 0.9);
+      } else if (dirChg > 18) {
+        // Penalize late overextended FOMO pumps or panic waterfalls
+        breakoutPoints = -20 - Math.min(18, (dirChg - 18) * 0.9);
       } else {
         breakoutPoints = 2;
       }
 
       let momPoints = 0;
-      if (momentum15mPct >= 0.1 && momentum15mPct <= 1.8) {
-        // Controlled green reclaim candle (not a vertical blow-off spike)
-        momPoints = clamp(12 + momentum15mPct * 4.5, 12, 20);
-      } else if (momentum15mPct > 1.8 && momentum15mPct <= 3.2) {
+      if (dirMom >= 0.1 && dirMom <= 1.8) {
+        momPoints = clamp(12 + dirMom * 4.5, 12, 20);
+      } else if (dirMom > 1.8 && dirMom <= 3.2) {
         momPoints = 10;
-      } else if (momentum15mPct > 3.2) {
-        // Late vertical candle — likely to mean-revert
+      } else if (dirMom > 3.2) {
         momPoints = 2;
-      } else if (momentum15mPct >= -0.8) {
+      } else if (dirMom >= -0.8) {
         momPoints = 6;
       } else {
         momPoints = 0;
@@ -210,17 +217,19 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
 
       const reasons: string[] = [];
       if (priceChange24hPct >= 0.5 && priceChange24hPct <= 12) {
-        reasons.push(`Sog'lom trend zonasi (+${priceChange24hPct}%)`);
-      } else if (priceChange24hPct > 18) {
-        reasons.push(`Kechki FOMO o'sishi (+${priceChange24hPct}%)`);
+        reasons.push(`Sog'lom LONG trend zonasi (+${priceChange24hPct}%)`);
+      } else if (priceChange24hPct <= -0.5 && priceChange24hPct >= -12) {
+        reasons.push(`Nazoratli SHORT trend zonasi (${priceChange24hPct}%)`);
+      } else if (Math.abs(priceChange24hPct) > 18) {
+        reasons.push(`Haddan tashqari cho'zilgan 24s harakat (${priceChange24hPct}%)`);
       }
       if (volumeSpikeRatio15m >= 1.1 && volumeSpikeRatio15m <= 3.5) {
         reasons.push(`Barqaror 15m hajm ${volumeSpikeRatio15m}x`);
       } else if (volumeSpikeRatio15m > 5.5) {
         reasons.push(`Haddan tashqari hajm sakrashi ${volumeSpikeRatio15m}x (ehtiyot)`);
       }
-      if (momentum15mPct >= 0.1 && momentum15mPct <= 1.8) {
-        reasons.push(`15m nazoratli impuls +${momentum15mPct}%`);
+      if (dirMom >= 0.1 && dirMom <= 1.8) {
+        reasons.push(`15m nazoratli impuls ${momentum15mPct >= 0 ? "+" : ""}${momentum15mPct}%`);
       }
       if (ticker.quoteVolume >= MIN_QUOTE_VOLUME_24H) {
         reasons.push(`Kuchli likvidlik ($${(ticker.quoteVolume / 1_000_000).toFixed(1)}M)`);
@@ -228,12 +237,12 @@ export async function runScoutScan(preloadedTickers?: MexcTicker24h[]): Promise<
       if (reasons.length === 0) reasons.push("Yuqori likvidli faol juftlik");
 
       const isHealthySetup =
-        priceChange24hPct >= 0.5 &&
-        priceChange24hPct <= 12 &&
+        dirChg >= 0.5 &&
+        dirChg <= 12 &&
         volumeSpikeRatio15m >= 1.1 &&
         volumeSpikeRatio15m <= 5.0 &&
-        momentum15mPct > 0;
-      const isAnomaly = isHealthySetup || (scoutScore >= 64 && priceChange24hPct <= 18);
+        dirMom > 0;
+      const isAnomaly = isHealthySetup || (scoutScore >= 64 && Math.abs(priceChange24hPct) <= 18);
 
       let isNewAlert = false;
       if (isAnomaly) {

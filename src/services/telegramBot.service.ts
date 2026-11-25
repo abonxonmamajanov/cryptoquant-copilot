@@ -18,9 +18,13 @@ import {
   buildTradingViewMexcUrl
 } from "../utils/exchangeLinks";
 import {
+  DirectionFilter,
+  formatDirectionFilterUz,
+  getActiveDirectionFilter,
   getActiveSignalMode,
   LEGAL_DISCLAIMER_UZ,
   RiskProfile,
+  setActiveDirectionFilter,
   setActiveSignalMode,
   SignalMode,
   SUBSCRIPTION_PLANS,
@@ -59,12 +63,14 @@ function buildMainMenu(): InlineKeyboard {
     .text("📂 Ochiq savdolarim", "menu_positions")
     .row()
     .text("🔍 Oxirgi Signallar", "menu_signals")
+    .text("⚖️ Yo'nalish (/direction)", "menu_direction")
+    .row()
     .text("🔀 Rejim (/mode)", "menu_mode")
-    .row()
     .text("📄 PDF Hisobot", "menu_pdf")
-    .text("💎 Tariflar (Free/Pro/VIP)", "menu_plans")
     .row()
+    .text("💎 Tariflar (Free/Pro/VIP)", "menu_plans")
     .text("⚙️ Risk Profili", "menu_risk")
+    .row()
     .text("⚠️ Ogohlantirish", "menu_disclaimer");
 }
 
@@ -77,6 +83,15 @@ function buildModeKeyboard(current: SignalMode): InlineKeyboard {
     .text(`${mark("SWING")}🏔️ SWING (4H)`, "mode_SWING");
 }
 
+function buildDirectionKeyboard(current: DirectionFilter): InlineKeyboard {
+  const mark = (d: DirectionFilter) => (current === d ? "✅ " : "");
+  return new InlineKeyboard()
+    .text(`${mark("BOTH")}⚖️ Ikkalasi (LONG + SHORT)`, "dir_BOTH")
+    .row()
+    .text(`${mark("LONG")}🟢 Faqat LONG`, "dir_LONG")
+    .text(`${mark("SHORT")}🔴 Faqat SHORT (1x)`, "dir_SHORT");
+}
+
 function formatStatsText(): string {
   const s = getDemoPortfolioSummary();
   const sign = s.totalPnlUsd >= 0 ? "+" : "";
@@ -84,7 +99,7 @@ function formatStatsText(): string {
     formatAllTimeTrackerTelegramText(),
     ``,
     `📊 *Qo'lda Demo Portfel*`,
-    `🔀 *Faol Rejim:* \`${getActiveSignalMode()}\``,
+    `🔀 *Faol Rejim:* \`${getActiveSignalMode()}\` | *Yo'nalish:* ${formatDirectionFilterUz()}`,
     `💰 *Balans:* $${s.currentBalanceUsd.toFixed(2)} (Boshlang'ich: $${s.initialBalanceUsd})`,
     `📈 *Demo PnL:* ${sign}$${s.totalPnlUsd.toFixed(2)} (${sign}${s.totalPnlPct}%)`,
     `🎯 *Demo Win Rate:* ${s.winRatePct}% (${s.winningTrades} foyda / ${s.losingTrades} zarar)`,
@@ -100,8 +115,11 @@ function formatLatestSignalsText(): string {
     return "🔍 Hozircha oxirgi 5-agent skanerlash natijalari shakllanmoqda. Birozdan so'ng qayta tekshiring.";
   }
 
+  const pulseLine = snap.marketPulse?.biasUz ?? "⚖️ Muvozanatli";
   const lines = [
     `🔍 *Oxirgi 5-Agent Tahlili (${snap.evaluatedCount} ta koin | Rejim: ${getActiveSignalMode()})*`,
+    `🧭 *Bozor Pulsi:* ${pulseLine}`,
+    `⚖️ *Faol yo'nalish:* ${formatDirectionFilterUz(snap.activeDirectionFilter ?? getActiveDirectionFilter())}`,
     `✅ Tasdiqlangan: ${snap.approvedCount} | ❌ Rad etilgan: ${snap.rejectedCount}`,
     ``
   ];
@@ -109,8 +127,14 @@ function formatLatestSignalsText(): string {
   for (const r of snap.records) {
     const icon = r.criticRisk.verdict === "APPROVE" ? "✅" : "❌";
     const modeTag = r.criticRisk.tradeMode === "SWING" ? "🏔️" : "⚡";
+    const dirTag =
+      r.technician.direction === "SHORT"
+        ? "🔴 SHORT 1x"
+        : r.technician.direction === "LONG"
+          ? "🟢 LONG"
+          : "⚪ SKIP";
     lines.push(
-      `${icon}${modeTag} *${r.scout.symbol}* — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
+      `${icon}${modeTag} *${r.scout.symbol}* [${dirTag}] — ${r.criticRisk.verdict} (${r.criticRisk.confidenceScore}/100) | RSI: ${r.technician.rsi14} | R:R 1:${r.technician.riskRewardRatio}`
     );
   }
   return lines.join("\n");
@@ -165,15 +189,20 @@ async function buildOpenPositionsPayload(): Promise<{
 
   summary.openTrades.forEach((t, idx) => {
     const live = livePrices[idx] ?? t.entryPrice;
-    const pnlPct = Number((((live - t.entryPrice) / t.entryPrice) * 100).toFixed(2));
+    const rawPct =
+      t.direction === "SHORT"
+        ? ((t.entryPrice - live) / t.entryPrice) * 100
+        : ((live - t.entryPrice) / t.entryPrice) * 100;
+    const pnlPct = Number(rawPct.toFixed(2));
     const pnlUsd = Number(((t.positionSizeUsd * pnlPct) / 100).toFixed(2));
     const sign = pnlUsd >= 0 ? "+" : "";
     const pnlIcon = pnlUsd >= 0 ? "🟢" : "🔴";
-    const beTag = t.breakevenActive ? " | 🛡️ BE faol" : "";
+    const dirTag = t.direction === "SHORT" ? "SHORT 1x" : "LONG";
+    const beTag = t.breakevenActive ? " | 🛡️ Himoya faol" : "";
     const srcTag = t.source === "MANUAL" ? "Qo'lda" : "Avto";
 
     lines.push(
-      `${pnlIcon} *${t.symbol}* (${t.tradeMode} • ${srcTag}${beTag})`,
+      `${pnlIcon} *${t.symbol}* (${dirTag} • ${t.tradeMode} • ${srcTag}${beTag})`,
       `  • Entry: \`${t.entryPrice}\` → Jonli: \`${live}\` | *${sign}${pnlPct}% (${sign}$${pnlUsd})*`,
       `  • TP1: \`${t.tp1Price}\` | TP2: \`${t.tp2Price}\` | SL: \`${t.stopLossPrice}\` | Hajm: $${t.positionSizeUsd}`,
       ``
@@ -338,6 +367,23 @@ export function startTelegramBot(): void {
       await ctx.reply(
         `🔀 *Signal Rejimini Tanlang* (Hozirgi: *${current}*)\n\n• *HYBRID:* Intraday (15M) + Swing (4H) signallari\n• *INTRADAY:* Faqat tezkor 15M signallar\n• *SWING:* Faqat kuchli 1H/4H trenddagi Swing signallar`,
         { parse_mode: "Markdown", reply_markup: buildModeKeyboard(current) }
+      );
+    });
+
+    bot.command("direction", async (ctx) => {
+      const arg = (ctx.match || "").trim().toUpperCase();
+      if (arg === "BOTH" || arg === "LONG" || arg === "SHORT") {
+        const updated = setActiveDirectionFilter(arg as DirectionFilter, String(ctx.from?.id ?? "unknown"));
+        await ctx.reply(`✅ Yo'nalish filtri *${formatDirectionFilterUz(updated)}* ga o'zgartirildi.`, {
+          parse_mode: "Markdown",
+          reply_markup: buildMainMenu()
+        });
+        return;
+      }
+      const current = getActiveDirectionFilter();
+      await ctx.reply(
+        `⚖️ *Signal Yo'nalishini Tanlang* (Hozirgi: *${formatDirectionFilterUz(current)}*)\n\n• *⚖️ Ikkalasi:* Bozor o'sganda 🟢 LONG (Spot), tushganda 🔴 SHORT (qat'iy 1x Hedge)\n• *🟢 Faqat LONG:* Faqat Spot o'sish signallari\n• *🔴 Faqat SHORT (1x):* Faqat kredit yelkasiz 1x pasayish/hedge signallari`,
+        { parse_mode: "Markdown", reply_markup: buildDirectionKeyboard(current) }
       );
     });
 
@@ -589,7 +635,7 @@ export function startTelegramBot(): void {
       }
     });
 
-    // Mode switcher callbacks
+    // Mode & Direction switcher callbacks
     bot.callbackQuery("menu_mode", async (ctx) => {
       await ctx.answerCallbackQuery();
       const current = getActiveSignalMode();
@@ -604,6 +650,25 @@ export function startTelegramBot(): void {
       setActiveSignalMode(chosen, String(ctx.from?.id ?? "unknown"));
       await ctx.answerCallbackQuery(`Rejim: ${chosen}`);
       await ctx.reply(`✅ Signal rejimi *${chosen}* ga o'zgartirildi.`, {
+        parse_mode: "Markdown",
+        reply_markup: buildMainMenu()
+      });
+    });
+
+    bot.callbackQuery("menu_direction", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const current = getActiveDirectionFilter();
+      await ctx.reply(
+        `⚖️ *Signal Yo'nalishini Tanlang* (Hozirgi: *${formatDirectionFilterUz(current)}*)\n\n• *⚖️ Ikkalasi:* Bozor o'sganda 🟢 LONG (Spot), tushganda 🔴 SHORT (qat'iy 1x Hedge)\n• *🟢 Faqat LONG:* Faqat Spot o'sish signallari\n• *🔴 Faqat SHORT (1x):* Faqat kredit yelkasiz 1x pasayish/hedge signallari`,
+        { parse_mode: "Markdown", reply_markup: buildDirectionKeyboard(current) }
+      );
+    });
+
+    bot.callbackQuery(/^dir_(BOTH|LONG|SHORT)$/, async (ctx) => {
+      const chosen = ctx.match[1] as DirectionFilter;
+      setActiveDirectionFilter(chosen, String(ctx.from?.id ?? "unknown"));
+      await ctx.answerCallbackQuery(`Yo'nalish: ${chosen}`);
+      await ctx.reply(`✅ Yo'nalish filtri *${formatDirectionFilterUz(chosen)}* ga o'zgartirildi.`, {
         parse_mode: "Markdown",
         reply_markup: buildMainMenu()
       });
@@ -661,6 +726,7 @@ export function startTelegramBot(): void {
         const critic = analysis.record.criticRisk;
         const png1h = generate15mChartPng(klines1h, {
           symbol,
+          direction: tech.direction,
           entryPrice: tech.entryPrice,
           takeProfitPrice: tech.takeProfitPrice,
           stopLossPrice: tech.stopLossPrice,
@@ -673,7 +739,7 @@ export function startTelegramBot(): void {
         );
         await ctx.replyWithPhoto(new InputFile(png1h, `${symbol}-1h.png`), {
           caption: [
-            `📊 *${symbol} — 1H Grafik (MEXC Spot)*`,
+            `📊 *${symbol} — 1H Grafik (${tech.direction === "SHORT" ? "MEXC 1x Hedge" : "MEXC Spot"})*`,
             `🎯 Entry: \`${tech.entryPrice}\` | ✅ TP1: \`${tech.tp1Price ?? tech.takeProfitPrice}\` | TP2: \`${tech.takeProfitPrice}\` | 🚀 TP3: \`${tech.tp3Price ?? tech.takeProfitPrice}\` | 🛑 SL: \`${tech.stopLossPrice}\``,
             `⚖️ R:R: 1:${tech.riskRewardRatio} | Joriy jonli holat: *${critic.verdict}* (${critic.confidenceScore}/100)`
           ].join("\n"),
@@ -797,8 +863,9 @@ export function startTelegramBot(): void {
       .setMyCommands([
         { command: "start", description: "Bosh menyu va Dashboard" },
         { command: "scan", description: "5-agent jonli skanerlash" },
-        { command: "positions", description: "Ochiq demo savdolarim" },
+        { command: "direction", description: "Yo'nalish (LONG / SHORT 1x / Ikkalasi)" },
         { command: "mode", description: "Rejim tanlash (Hybrid/Intraday/Swing)" },
+        { command: "positions", description: "Ochiq demo savdolarim" },
         { command: "news", description: "USD Macro News Shield holati" },
         { command: "summary", description: "24 soatlik signal hisoboti" },
         { command: "pdf", description: "PDF demo portfel hisoboti" },

@@ -4,6 +4,7 @@ import path from "path";
 export type PlanTier = "FREE" | "PRO" | "VIP";
 export type RiskProfile = "CONSERVATIVE" | "MODERATE" | "AGGRESSIVE";
 export type SignalMode = "HYBRID" | "INTRADAY" | "SWING";
+export type DirectionFilter = "BOTH" | "LONG" | "SHORT";
 
 export interface PlanDefinition {
   tier: PlanTier;
@@ -21,6 +22,7 @@ export interface SubscriberRecord {
   tier: PlanTier;
   riskProfile: RiskProfile;
   signalMode?: SignalMode;
+  directionFilter?: DirectionFilter;
   createdAt: string;
   updatedAt: string;
 }
@@ -45,10 +47,10 @@ export const SUBSCRIPTION_PLANS: PlanDefinition[] = [
     priceUsdApprox: 5,
     billingCycleUz: "Oyiga",
     featuresUz: [
-      "5 ta agent elagidan o'tgan barcha MEXC Spot signallari",
+      "5 ta agent elagidan o'tgan barcha MEXC Spot + 1x Hedge signallari",
       "Aniq Entry, Take-Profit, Stop-Loss va R:R >= 1:2",
       "TP/SL urilganda avtomatik Telegram bildirishnoma",
-      "Shaxsiy risk-profil sozlamasi"
+      "Shaxsiy risk-profil va yo'nalish (/direction) sozlamasi"
     ]
   },
   {
@@ -61,20 +63,22 @@ export const SUBSCRIPTION_PLANS: PlanDefinition[] = [
       "Pro tarifdagi barcha imkoniyatlar",
       "Ustuvor tezkor signal yetkazib berish (0 kechikish)",
       "Istalgan vaqtda bir tugma bilan jonli PDF hisobot",
-      "Kelajakdagi Short/Hedge va ko'p birjali signallarga birinchi kirish"
+      "1x Xavfsiz SHORT/Hedge va Order-Flow signallariga to'liq kirish"
     ]
   }
 ];
 
 export const LEGAL_DISCLAIMER_UZ =
-  "⚠️ Huquqiy ogohlantirish: CryptoQuant-Copilot avtomatlashtirilgan texnik va bozor tahlili vositasidir. Barcha signallar va demo portfel natijalari faqat axborot maqsadida taqdim etiladi va moliyaviy maslahat hisoblanmaydi. Kriptovalyuta savdosi yuqori risk bilan bog'liq — barcha qarorlar va risklarni o'zingiz boshqarasiz.";
+  "⚠️ Huquqiy ogohlantirish: CryptoQuant-Copilot avtomatlashtirilgan texnik va bozor tahlili vositasidir. Barcha signallar (LONG hamda qat'iy 1x kredit yelkasiz SHORT/Hedge) va demo portfel natijalari faqat axborot maqsadida taqdim etiladi va moliyaviy maslahat hisoblanmaydi. Kriptovalyuta savdosi yuqori risk bilan bog'liq — barcha qarorlar va risklarni o'zingiz boshqarasiz.";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const SUBS_FILE = path.join(DATA_DIR, "subscriptions.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 let subscribers = loadSubscribers();
-let activeSignalMode: SignalMode = loadSignalMode();
+const loadedSettings = loadSettings();
+let activeSignalMode: SignalMode = loadedSettings.signalMode;
+let activeDirectionFilter: DirectionFilter = loadedSettings.directionFilter;
 
 function loadSubscribers(): Record<string, SubscriberRecord> {
   try {
@@ -87,24 +91,34 @@ function loadSubscribers(): Record<string, SubscriberRecord> {
   return {};
 }
 
-function loadSignalMode(): SignalMode {
+function loadSettings(): { signalMode: SignalMode; directionFilter: DirectionFilter } {
+  let signalMode: SignalMode = "HYBRID";
+  let directionFilter: DirectionFilter = "BOTH";
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")) as {
         signalMode?: SignalMode;
+        directionFilter?: DirectionFilter;
       };
       if (
         parsed.signalMode === "HYBRID" ||
         parsed.signalMode === "INTRADAY" ||
         parsed.signalMode === "SWING"
       ) {
-        return parsed.signalMode;
+        signalMode = parsed.signalMode;
+      }
+      if (
+        parsed.directionFilter === "BOTH" ||
+        parsed.directionFilter === "LONG" ||
+        parsed.directionFilter === "SHORT"
+      ) {
+        directionFilter = parsed.directionFilter;
       }
     }
   } catch {
-    // Fallback HYBRID
+    // Fallback defaults
   }
-  return "HYBRID";
+  return { signalMode, directionFilter };
 }
 
 function saveSubscribers(): void {
@@ -118,14 +132,22 @@ function saveSubscribers(): void {
   }
 }
 
-function saveSignalMode(): void {
+function saveSettings(): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     fs.writeFileSync(
       SETTINGS_FILE,
-      JSON.stringify({ signalMode: activeSignalMode, updatedAt: new Date().toISOString() }, null, 2),
+      JSON.stringify(
+        {
+          signalMode: activeSignalMode,
+          directionFilter: activeDirectionFilter,
+          updatedAt: new Date().toISOString()
+        },
+        null,
+        2
+      ),
       "utf-8"
     );
   } catch {
@@ -139,7 +161,7 @@ export function getActiveSignalMode(): SignalMode {
 
 export function setActiveSignalMode(mode: SignalMode, telegramUserId?: string): SignalMode {
   activeSignalMode = mode;
-  saveSignalMode();
+  saveSettings();
   if (telegramUserId) {
     const user = upsertSubscriber(telegramUserId);
     user.signalMode = mode;
@@ -147,6 +169,31 @@ export function setActiveSignalMode(mode: SignalMode, telegramUserId?: string): 
     saveSubscribers();
   }
   return activeSignalMode;
+}
+
+export function getActiveDirectionFilter(): DirectionFilter {
+  return activeDirectionFilter;
+}
+
+export function setActiveDirectionFilter(
+  dir: DirectionFilter,
+  telegramUserId?: string
+): DirectionFilter {
+  activeDirectionFilter = dir;
+  saveSettings();
+  if (telegramUserId) {
+    const user = upsertSubscriber(telegramUserId);
+    user.directionFilter = dir;
+    user.updatedAt = new Date().toISOString();
+    saveSubscribers();
+  }
+  return activeDirectionFilter;
+}
+
+export function formatDirectionFilterUz(dir: DirectionFilter = activeDirectionFilter): string {
+  if (dir === "LONG") return "🟢 Faqat LONG";
+  if (dir === "SHORT") return "🔴 Faqat SHORT (1x)";
+  return "⚖️ Ikkalasi (LONG + SHORT 1x)";
 }
 
 export function upsertSubscriber(
@@ -171,6 +218,7 @@ export function upsertSubscriber(
     tier: "FREE",
     riskProfile: "MODERATE",
     signalMode: activeSignalMode,
+    directionFilter: activeDirectionFilter,
     createdAt: now,
     updatedAt: now
   };
@@ -194,4 +242,5 @@ export function getSubscriberCount(): number {
 export function resetSubscribersForTest(): void {
   subscribers = {};
   activeSignalMode = "HYBRID";
+  activeDirectionFilter = "BOTH";
 }
