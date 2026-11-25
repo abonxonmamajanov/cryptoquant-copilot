@@ -82,10 +82,12 @@ function normalizeMexcPriceChangePct(rawPct: unknown, lastPrice: number, openPri
   return Number((n * 100).toFixed(4));
 }
 
+let latestTickers24hSnapshot: { fetchedAt: number; tickers: MexcTicker24h[] } | null = null;
+
 export async function fetchMexcTickers24h(): Promise<MexcTicker24h[]> {
   const raw = await fetchWithMirrorFallback<Array<Record<string, string>>>("/api/v3/ticker/24hr", 15000);
 
-  return raw
+  const parsed = raw
     .map((item) => {
       const lastPrice = Number(item.lastPrice || 0);
       return {
@@ -99,6 +101,23 @@ export async function fetchMexcTickers24h(): Promise<MexcTicker24h[]> {
       };
     })
     .filter((t) => t.symbol.length > 0 && Number.isFinite(t.lastPrice) && t.lastPrice > 0);
+
+  latestTickers24hSnapshot = {
+    fetchedAt: Date.now(),
+    tickers: parsed
+  };
+  return parsed;
+}
+
+/**
+ * Reuses the 24h ticker snapshot already fetched by the 60s Crypto Scout cycle
+ * (0 extra /api/v3/ticker/24hr API calls when cache is warm).
+ */
+export async function getCachedMexcTickers24h(maxAgeMs = 180_000): Promise<MexcTicker24h[]> {
+  if (latestTickers24hSnapshot && Date.now() - latestTickers24hSnapshot.fetchedAt <= maxAgeMs) {
+    return latestTickers24hSnapshot.tickers;
+  }
+  return fetchMexcTickers24h();
 }
 
 export async function fetchMexcTicker24h(symbol: string): Promise<MexcTicker24h> {

@@ -87,7 +87,7 @@ export function renderDashboardHtml(): string {
             <h1 class="text-base font-extrabold tracking-tight text-white sm:text-lg">CryptoQuant-Copilot</h1>
             <span class="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
               <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
-              PRO 6.2 • Spot + 1x Hedge
+              PRO 7.0 • Crypto + RWA Stocks
             </span>
           </div>
           <p class="text-[11px] font-medium italic text-cyan-300/90 sm:text-xs">
@@ -117,7 +117,7 @@ export function renderDashboardHtml(): string {
       </div>
     </div>
 
-    <!-- 4-TAB NAVIGATION BAR -->
+    <!-- 5-TAB NAVIGATION BAR -->
     <div class="border-t border-slate-800/80 bg-[#070d1c]/90">
       <div class="custom-scroll mx-auto flex max-w-7xl items-center gap-2 overflow-x-auto px-4 py-2 sm:px-6">
         <button id="tabBtn_office" type="button" onclick="switchTab('office')" class="tab-btn-active shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-1.5 text-xs font-bold transition sm:text-sm">
@@ -131,6 +131,9 @@ export function renderDashboardHtml(): string {
         </button>
         <button id="tabBtn_tools" type="button" onclick="switchTab('tools')" class="tab-btn-idle shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-1.5 text-xs font-bold transition sm:text-sm">
           <span>🧰</span><span>Treyder Asboblari</span>
+        </button>
+        <button id="tabBtn_rwa" type="button" onclick="switchTab('rwa')" class="tab-btn-idle shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-1.5 text-xs font-bold transition sm:text-sm">
+          <span>📈</span><span>Token-Aksiyalar (RWA)</span>
         </button>
       </div>
     </div>
@@ -562,11 +565,115 @@ export function renderDashboardHtml(): string {
         </div>
       </div>
 
-      <!-- 3. All 11 Bot Hot Commands -->
+      <!-- 3. All Bot Hot Commands -->
       <div class="neon-card rounded-2xl p-5">
-        <h2 class="text-base font-bold text-white">⚡ Bot Qaynoq Buyruqlari (11 ta tezkor buyruq)</h2>
+        <h2 class="text-base font-bold text-white">⚡ Bot Qaynoq Buyruqlari (Tezkor buyruqlar)</h2>
         <p class="mt-1 text-xs text-slate-400">Istalgan buyruqni 1 bosishda nusxalab Telegram botga yuboring</p>
         <div id="hotCommandsGrid" class="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3"></div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 5: TOKEN-AKSIYALAR (RWA — MEXC ONDO & xSTOCKS) -->
+    <!-- ================================================================== -->
+    <section id="tabPanel_rwa" class="hidden space-y-5">
+      <!-- Top Status Strip: US Market Hours, SPY & QQQ 4H Regime, RWA ON/OFF Toggle -->
+      <div class="neon-card rounded-2xl border border-cyan-500/30 p-4 sm:p-5">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 class="text-base font-extrabold text-white sm:text-lg">📈 Token-Aksiyalar (MEXC Ondo &amp; xStocks — RWA)</h2>
+            <p class="mt-0.5 text-xs text-slate-400">
+              Izolyatsiya qilingan AQSh aksiyalari moduli • 7 ta himoya filtri (NASDAQ Peg, Spread &le; 0.25%, 3x ETF qora ro'yxati) • Kripto yadrosiga 0% ta'sir
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span id="rwaMarketBadge" class="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-1 text-xs font-bold text-slate-300">
+              🕒 AQSh Bozor: Yuklanmoqda...
+            </span>
+            <span id="rwaBenchmarkBadge" class="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-bold text-cyan-300">
+              📊 SPY / QQQ 4H: —
+            </span>
+            <button
+              id="rwaToggleBtn"
+              type="button"
+              onclick="toggleRwaAuto()"
+              class="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/25"
+            >
+              🔔 RWA Avto-Signal: ON
+            </button>
+            <button
+              id="rwaRefreshBtn"
+              type="button"
+              onclick="refreshRwaStocks(true)"
+              class="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/50 bg-sky-500/15 px-3 py-1.5 text-xs font-bold text-sky-300 transition hover:bg-sky-500/25"
+            >
+              🔄 Yangilash
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Stock Search Box (NVDA, AAPL, TSLA, META...) -->
+      <div class="neon-card rounded-2xl p-5">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-bold text-white sm:text-base">🔎 Tezkor Aksiya Tekshiruvi (15M Grafik + Real NASDAQ Peg)</h3>
+            <p class="mt-0.5 text-xs text-slate-400">Aksiya tikerini kiriting (masalan: <span class="font-mono text-cyan-300">NVDA</span>, <span class="font-mono text-cyan-300">AAPL</span>, <span class="font-mono text-cyan-300">TSLA</span>, <span class="font-mono text-cyan-300">META</span>) — 3x leveraged ETF lar avtomatik bloklanadi</p>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <button type="button" onclick="quickCheckRwaStock('NVDA')" class="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:border-cyan-400">NVDA</button>
+            <button type="button" onclick="quickCheckRwaStock('AAPL')" class="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:border-cyan-400">AAPL</button>
+            <button type="button" onclick="quickCheckRwaStock('TSLA')" class="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:border-cyan-400">TSLA</button>
+            <button type="button" onclick="quickCheckRwaStock('META')" class="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:border-cyan-400">META</button>
+            <button type="button" onclick="quickCheckRwaStock('MSFT')" class="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:border-cyan-400">MSFT</button>
+          </div>
+        </div>
+        <form id="rwaSearchForm" class="mt-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            id="rwaSearchInput"
+            type="text"
+            placeholder="Masalan: NVDA, AAPL, TSLA, AMZN, GOOGL..."
+            class="w-full rounded-xl border border-slate-700 bg-slate-950/90 px-4 py-2.5 text-sm font-mono text-white placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+          />
+          <button
+            id="rwaSearchBtn"
+            type="submit"
+            class="shrink-0 rounded-xl bg-gradient-to-r from-cyan-400 to-sky-500 px-5 py-2.5 text-sm font-bold text-slate-950 shadow shadow-cyan-500/20 hover:brightness-110 disabled:opacity-60"
+          >
+            📈 Aksiyani Tekshirish
+          </button>
+        </form>
+        <div id="rwaSearchResult" class="mt-4 hidden"></div>
+      </div>
+
+      <!-- Live Table of Top Ondo / xStocks Tokenized Stocks -->
+      <div class="neon-card overflow-hidden rounded-2xl">
+        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/90 px-5 py-4">
+          <div>
+            <h3 class="text-sm font-bold text-white sm:text-base">🏛️ Top Faol Token-Aksiyalar (MEXC Ondo / xStocks)</h3>
+            <p class="text-[11px] text-slate-400">Har 5 daqiqada mustaqil yangilanadi • Dublikatlar tozalangan (Ondo ustuvor) • ⚠️ Limit buyurtma tavsiya etiladi</p>
+          </div>
+          <span id="rwaUniverseMeta" class="font-mono text-xs text-slate-400">Yuklanmoqda...</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-slate-800/90 text-left text-xs">
+            <thead class="bg-slate-950/75 text-[11px] uppercase tracking-wider text-slate-400">
+              <tr>
+                <th class="px-4 py-3">Aksiya</th>
+                <th class="px-4 py-3">MEXC Juftlik</th>
+                <th class="px-4 py-3">Narx ($)</th>
+                <th class="px-4 py-3">24s %</th>
+                <th class="px-4 py-3">24s Hajm ($)</th>
+                <th class="px-4 py-3">Spread %</th>
+                <th class="px-4 py-3">Qaror / Yo'nalish</th>
+                <th class="px-4 py-3 text-right">Amal</th>
+              </tr>
+            </thead>
+            <tbody id="rwaStocksTableBody" class="divide-y divide-slate-800/60 bg-slate-950/30">
+              <tr><td colspan="8" class="px-4 py-6 text-center text-slate-500">RWA token-aksiyalar yuklanmoqda...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   </main>
@@ -578,8 +685,8 @@ export function renderDashboardHtml(): string {
         ${LEGAL_DISCLAIMER_UZ} <span class="font-semibold text-slate-300">Moliyaviy maslahat emas.</span>
       </p>
       <div class="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 6.2 • <em>"${BRAND_MOTTO}"</em></span>
-        <span>100% MEXC Spot + 1x Hedge • Stablecoinlar filtrlangan • Manual Demo</span>
+        <span>© ${new Date().getFullYear()} CryptoQuant-Copilot PRO 7.0 • <em>"${BRAND_MOTTO}"</em></span>
+        <span>100% MEXC Spot + 1x Hedge + Isolated RWA Stocks • Manual Demo</span>
       </div>
     </div>
   </footer>
@@ -612,8 +719,8 @@ export function renderDashboardHtml(): string {
       setTimeout(() => { el.className = "hidden"; }, 5500);
     }
 
-    // ==================== 4-TAB SWITCHER ====================
-    const TAB_IDS = ["office", "analytics", "signals", "tools"];
+    // ==================== 5-TAB SWITCHER ====================
+    const TAB_IDS = ["office", "analytics", "signals", "tools", "rwa"];
     let currentTab = "office";
 
     function switchTab(tab) {
@@ -632,6 +739,7 @@ export function renderDashboardHtml(): string {
       });
       if (tab === "signals") refreshSignals24h();
       if (tab === "tools") refreshAlerts();
+      if (tab === "rwa") refreshRwaStocks(false);
       if (tab === "analytics") {
         setTimeout(() => {
           if (waveChart) waveChart.resize();
@@ -1744,6 +1852,10 @@ export function renderDashboardHtml(): string {
       { cmd: "/start", desc: "Asosiy menyu va Mini App Dashboard" },
       { cmd: "/scan", desc: "5-agent jonli bozor skanerlash" },
       { cmd: "/check SOL", desc: "Istalgan koinni 15M grafik + 5-agent tekshirish" },
+      { cmd: "/stocks", desc: "AQSh Token-Aksiyalar (MEXC Ondo/RWA)" },
+      { cmd: "/stock NVDA", desc: "Aksiya 15M grafik + Real NASDAQ Peg tekshiruvi" },
+      { cmd: "/rwa off", desc: "RWA avto-signallarini o'chirish (/rwa on)" },
+      { cmd: "/direction", desc: "Yo'nalish tanlash (LONG / SHORT 1x / Ikkalasi)" },
       { cmd: "/buy SOL 100", desc: "Demo portfelda qo'lda pozitsiya ochish" },
       { cmd: "/positions", desc: "Ochiq demo savdolar va jonli PnL" },
       { cmd: "/mode", desc: "HYBRID / INTRADAY / SWING rejimini tanlash" },
@@ -1770,6 +1882,186 @@ export function renderDashboardHtml(): string {
         '<button type="button" onclick="copyCmd(\\'' + escapeHtml(item.cmd) + '\\')" class="shrink-0 rounded-md border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:bg-cyan-500/25">Nusxa</button>' +
       '</div>'
     ).join("");
+
+    // ==================== TAB 5: ISOLATED RWA STOCKS ENGINE ====================
+    function renderRwaHeader(data) {
+      const mEl = document.getElementById("rwaMarketBadge");
+      if (mEl && data.marketStatus) {
+        if (data.marketStatus.isOpenForAutoSignals) {
+          mEl.className = "inline-flex items-center gap-1.5 rounded-full border border-emerald-500/50 bg-emerald-500/15 px-3 py-1 text-xs font-bold text-emerald-300";
+        } else {
+          mEl.className = "inline-flex items-center gap-1.5 rounded-full border border-amber-500/50 bg-amber-500/15 px-3 py-1 text-xs font-bold text-amber-300";
+        }
+        mEl.textContent = data.marketStatus.sessionLabelUz;
+      }
+
+      const bEl = document.getElementById("rwaBenchmarkBadge");
+      if (bEl && data.benchmark) {
+        const bm = data.benchmark;
+        const bmClass = bm.usIndexRegime === "BULLISH"
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+          : bm.usIndexRegime === "BEARISH"
+            ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
+            : "border-cyan-500/40 bg-cyan-500/10 text-cyan-300";
+        bEl.className = "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold " + bmClass;
+        bEl.textContent = "📊 SPY (" + bm.spyTrend4h + ") & QQQ (" + bm.qqqTrend4h + ") 4H: " + bm.usIndexRegime;
+      }
+
+      const tBtn = document.getElementById("rwaToggleBtn");
+      if (tBtn && typeof data.rwaEnabled === "boolean") {
+        if (data.rwaEnabled) {
+          tBtn.className = "inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/25";
+          tBtn.textContent = "🔔 RWA Avto-Signal: ON";
+        } else {
+          tBtn.className = "inline-flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-500/15 px-3 py-1.5 text-xs font-bold text-rose-300 transition hover:bg-rose-500/25";
+          tBtn.textContent = "⏸️ RWA Avto-Signal: OFF";
+        }
+      }
+    }
+
+    async function refreshRwaStocks(forceRefresh) {
+      const btn = document.getElementById("rwaRefreshBtn");
+      if (btn) btn.disabled = true;
+      try {
+        const url = forceRefresh ? "/api/rwa/latest?refresh=1" : "/api/rwa/latest";
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderRwaHeader(data);
+
+        const snap = data.snapshot;
+        const metaEl = document.getElementById("rwaUniverseMeta");
+        const tbody = document.getElementById("rwaStocksTableBody");
+        if (!snap || !snap.stocks || snap.stocks.length === 0) {
+          if (metaEl) metaEl.textContent = "Skanerlash tayyor — 'Yangilash' tugmasini bosing";
+          if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-6 text-center text-slate-400">Hozircha keshlangan RWA skan natijasi yo\\'q. Yuqoridagi <strong>🔄 Yangilash</strong> tugmasini bosing yoki istalgan aksiyani qidiring (masalan: NVDA).</td></tr>';
+          }
+          return;
+        }
+
+        if (metaEl) {
+          metaEl.textContent = "Faol: " + snap.totalUniverseCount + " ta | Tahlil: " + snap.deepScannedCount + " | Tasdiq: " + snap.approvedCount;
+        }
+
+        if (tbody) {
+          tbody.innerHTML = snap.stocks.map((s) => {
+            const chgColor = s.priceChange24hPct >= 0 ? "text-emerald-400" : "text-rose-400";
+            const chgSign = s.priceChange24hPct >= 0 ? "+" : "";
+            const ok = s.verdict === "APPROVE";
+            const dirTag = s.direction === "SHORT"
+              ? '<span class="rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-bold text-rose-300">SHORT 1x</span>'
+              : '<span class="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">LONG</span>';
+            const vBadge = ok
+              ? '<span class="rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">APPROVE (' + escapeHtml(s.confidenceScore) + ')</span>'
+              : '<span class="rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">REJECT (' + escapeHtml(s.confidenceScore) + ')</span>';
+            const spreadCls = s.spreadPct <= 0.25 ? "text-emerald-300" : "text-rose-400";
+            return (
+              '<tr class="hover:bg-slate-900/50">' +
+                '<td class="px-4 py-2.5 font-mono font-extrabold text-white">' + escapeHtml(s.canonicalTicker) + ' <span class="ml-1 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-cyan-300">' + escapeHtml(s.provider) + '</span></td>' +
+                '<td class="px-4 py-2.5 font-mono text-slate-300">' + escapeHtml(s.mexcSymbol) + '</td>' +
+                '<td class="px-4 py-2.5 font-mono font-semibold text-white">$' + escapeHtml(s.lastPrice) + '</td>' +
+                '<td class="px-4 py-2.5 font-mono font-bold ' + chgColor + '">' + chgSign + escapeHtml(s.priceChange24hPct) + '%</td>' +
+                '<td class="px-4 py-2.5 font-mono text-slate-300">$' + Number(s.quoteVolume24hUsd || 0).toLocaleString("en-US") + '</td>' +
+                '<td class="px-4 py-2.5 font-mono ' + spreadCls + '">' + escapeHtml(s.spreadPct) + '%</td>' +
+                '<td class="px-4 py-2.5"><div class="flex flex-wrap items-center gap-1">' + dirTag + vBadge + '</div></td>' +
+                '<td class="px-4 py-2.5 text-right"><button type="button" onclick="quickCheckRwaStock(\\'' + escapeHtml(s.canonicalTicker) + '\\')" class="rounded-md border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1 text-[11px] font-bold text-cyan-300 hover:bg-cyan-500/25">15M Grafik</button></td>' +
+              '</tr>'
+            );
+          }).join("");
+        }
+      } catch {
+        // Non-fatal
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+    window.refreshRwaStocks = refreshRwaStocks;
+
+    async function toggleRwaAuto() {
+      try {
+        const res = await fetch("/api/rwa/toggle", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error("Holat o'zgarmadi");
+        renderRwaHeader(data);
+        showToast(data.rwaEnabled ? "✅ RWA Avto-Signallar YOQILDI (ON)" : "⏸️ RWA Avto-Signallar O'CHIRILDI (OFF)", false);
+      } catch (err) {
+        showToast("❌ " + err.message, true);
+      }
+    }
+    window.toggleRwaAuto = toggleRwaAuto;
+
+    async function checkRwaStock(ticker) {
+      const box = document.getElementById("rwaSearchResult");
+      const btn = document.getElementById("rwaSearchBtn");
+      const clean = (ticker || "").trim();
+      if (!clean) return;
+      btn.disabled = true;
+      btn.textContent = "Tahlil...";
+      box.classList.remove("hidden");
+      box.innerHTML = '<div class="rounded-xl border border-slate-800 bg-slate-950/80 p-4 text-xs text-slate-400">🏛️ ' + escapeHtml(clean.toUpperCase()) + ' — MEXC Ondo + Real NASDAQ Peg + 15M grafik tekshirilmoqda...</div>';
+      try {
+        const res = await fetch("/api/rwa/check/" + encodeURIComponent(clean));
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Aksiya topilmadi");
+
+        const r = data.result;
+        const ok = r.verdict === "APPROVE";
+        const dirBadge = r.direction === "SHORT"
+          ? '<span class="rounded bg-rose-500/20 px-2 py-0.5 text-xs font-bold text-rose-300">🔴 SHORT (1x Hedge)</span>'
+          : '<span class="rounded bg-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-300">🟢 LONG (Spot)</span>';
+        const pegStr = r.realStockPrice !== null && r.pegPremiumPct !== null
+          ? "$" + escapeHtml(r.realStockPrice) + " (" + (r.pegPremiumPct >= 0 ? "+" : "") + escapeHtml(r.pegPremiumPct) + "% Peg)"
+          : "Aniqlanmadi";
+        const pegColor = r.pegPremiumPct !== null && Math.abs(r.pegPremiumPct) > 0.8 ? "text-rose-400" : "text-emerald-300";
+
+        box.innerHTML =
+          '<div class="rounded-xl border border-cyan-500/30 bg-slate-950/90 p-4 space-y-3">' +
+            '<div class="flex flex-wrap items-center justify-between gap-2">' +
+              '<div class="flex flex-wrap items-center gap-2">' +
+                '<span class="text-lg font-black text-white">' + escapeHtml(r.canonicalTicker) + '</span>' +
+                '<span class="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-cyan-300">' + escapeHtml(r.mexcSymbol) + ' • ' + escapeHtml(r.provider) + '</span>' +
+                dirBadge +
+                '<span class="rounded-md border px-2 py-0.5 text-xs font-bold ' + (ok ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300' : 'border-rose-500/40 bg-rose-500/15 text-rose-300') + '">' + escapeHtml(r.verdict) + ' (' + escapeHtml(r.confidenceScore) + '/100)</span>' +
+              '</div>' +
+              '<div class="flex flex-wrap gap-3 font-mono text-xs">' +
+                '<span>Entry: <strong class="text-cyan-300">' + escapeHtml(r.entryPrice) + '</strong></span>' +
+                '<span>TP1: <strong class="text-emerald-300">' + escapeHtml(r.tp1Price) + '</strong></span>' +
+                '<span>TP2: <strong class="text-emerald-400">' + escapeHtml(r.tp2Price) + '</strong></span>' +
+                '<span>TP3: <strong class="text-emerald-400">' + escapeHtml(r.tp3Price) + '</strong></span>' +
+                '<span>SL: <strong class="text-rose-400">' + escapeHtml(r.stopLossPrice) + '</strong></span>' +
+              '</div>' +
+            '</div>' +
+            '<div class="rounded-lg border border-slate-800 bg-slate-900/70 p-3 text-xs space-y-1 text-slate-200">' +
+              '<div>• <strong class="text-cyan-300">Real NASDAQ Peg:</strong> <span class="font-mono font-bold ' + pegColor + '">' + pegStr + '</span> | Spread: <strong class="font-mono">' + escapeHtml(r.spreadPct) + '%</strong> | ±0.5% Depth: <strong class="font-mono">$' + escapeHtml(r.depthHalfPctUsd) + '</strong></div>' +
+              '<div>• <strong class="text-emerald-300">Trend &amp; Indeks:</strong> 15M/' + escapeHtml(r.trend1h) + '/' + escapeHtml(r.trend4h) + ' | SPY/QQQ 4H: <strong>' + escapeHtml(r.usIndexRegime) + '</strong> | RSI: ' + Math.round(r.rsi14) + ' | ADX: ' + Math.round(r.adx14) + '</div>' +
+              '<div>• <strong class="text-amber-300">Izoh:</strong> ' + escapeHtml((r.reasons && r.reasons[0]) || "7 ta himoya filtri tekshirildi") + ' — <em>⚠️ Limit buyurtma bilan kiring (RWA likvidlik qoidasi)</em></div>' +
+            '</div>' +
+            (r.chartDataUrl ? '<div class="overflow-hidden rounded-xl border border-slate-800"><img src="' + r.chartDataUrl + '" alt="RWA 15M Chart" class="block w-full h-auto" /></div>' : '') +
+            '<div class="flex flex-wrap gap-2">' +
+              '<a href="' + escapeHtml(r.tradingViewUrl) + '" target="_blank" rel="noopener" class="rounded-lg bg-sky-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-sky-400">📈 TradingView (NASDAQ 15M)</a>' +
+            '</div>' +
+          '</div>';
+      } catch (err) {
+        box.innerHTML = '<div class="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">❌ ' + escapeHtml(err.message) + '</div>';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "📈 Aksiyani Tekshirish";
+      }
+    }
+
+    function quickCheckRwaStock(ticker) {
+      const inp = document.getElementById("rwaSearchInput");
+      if (inp) inp.value = ticker;
+      checkRwaStock(ticker);
+    }
+    window.quickCheckRwaStock = quickCheckRwaStock;
+
+    document.getElementById("rwaSearchForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const inp = document.getElementById("rwaSearchInput");
+      checkRwaStock(inp ? inp.value : "");
+    });
 
     // ==================== LIVE POLLING & DATA LOADERS ====================
     async function refreshLogs() {

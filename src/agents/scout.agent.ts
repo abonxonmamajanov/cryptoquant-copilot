@@ -5,6 +5,7 @@ import {
   MexcTicker24h
 } from "../services/mexcClient.service";
 import { getActiveDirectionFilter } from "../services/subscription.service";
+import { isTokenizedStockSymbol } from "../services/rwaStocks.service";
 
 const STABLECOIN_BASES = new Set([
   "USDT", "USDC", "FDUSD", "TUSD", "DAI", "USDD", "USDP", "BUSD",
@@ -52,6 +53,8 @@ export interface ScoutScanSnapshot {
 export function isFilteredOutSymbol(symbol: string): boolean {
   const upper = String(symbol || "").toUpperCase().trim();
   if (!upper.endsWith("USDT")) return true;
+  // Strict Stage 7.0 Isolation Wall: exclude MEXC Ondo (*ONUSDT) & xStocks (*XUSDT) from Crypto Scout
+  if (isTokenizedStockSymbol(upper)) return true;
   const base = upper.slice(0, -4);
   // Strictly allow clean ASCII alphanumeric crypto tickers only (blocks GOLD(PAXG), OIL(USOON), non-ASCII memes)
   if (!base || !/^[A-Z0-9]{2,15}$/.test(base)) return true;

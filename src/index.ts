@@ -55,6 +55,21 @@ import { getRecentActivityLogs, pushActivityLog } from "./services/activityLog.s
 import { addPriceAlert, listPriceAlerts, removePriceAlert } from "./services/priceAlert.service";
 import { getCircuitBreakerStatus as getWallStreetCircuitBreakerStatus } from "./services/circuitBreaker.service";
 import {
+  analyzeRwaStock,
+  getLatestRwaSnapshot,
+  getUsIndexBenchmark,
+  getUsStockMarketStatus,
+  isRwaEnabled,
+  setRwaEnabled,
+  toggleRwaEnabled
+} from "./services/rwaStocks.service";
+import {
+  getRwaSchedulerStats,
+  startRwaScheduler,
+  stopRwaScheduler,
+  triggerRwaScanNow
+} from "./services/rwaScheduler.service";
+import {
   createRateLimiter,
   isSafeSymbolInput,
   safeErrorHandler,
@@ -77,7 +92,9 @@ app.use(
     "/api/pipeline/run",
     "/api/portfolio/buy",
     "/api/portfolio/close",
-    "/api/alerts"
+    "/api/alerts",
+    "/api/rwa/check",
+    "/api/rwa/toggle"
   ],
   heavyApiLimiter
 );
@@ -104,6 +121,11 @@ app.get("/health", (_req, res) => {
     subscribersCount: getSubscriberCount(),
     scheduler: getSchedulerStats(),
     wallStreetCircuitBreaker,
+    rwaModule: {
+      stage: "stage-7.0-rwa-stocks",
+      ...getRwaSchedulerStats(),
+      marketStatus: getUsStockMarketStatus()
+    },
     signalTracker: {
       activeCount: tracker.activeCount,
       activeLongCount: tracker.activeLongCount,
@@ -484,6 +506,63 @@ app.post("/api/reports/pdf/telegram", async (_req, res) => {
   }
 });
 
+// =============================================================================
+// STAGE 7.0 — ISOLATED RWA TOKENIZED STOCKS API ENDPOINTS
+// =============================================================================
+app.get("/api/rwa/latest", async (req, res) => {
+  try {
+    let snapshot = getLatestRwaSnapshot();
+    if (String(req.query.refresh || "") === "1") {
+      snapshot = await triggerRwaScanNow();
+    }
+    const marketStatus = getUsStockMarketStatus();
+    const benchmark = snapshot?.benchmark ?? (await getUsIndexBenchmark());
+    res.status(200).json({
+      ok: true,
+      rwaEnabled: isRwaEnabled(),
+      marketStatus,
+      benchmark,
+      scheduler: getRwaSchedulerStats(),
+      snapshot
+    });
+  } catch {
+    res.status(500).json({ ok: false, error: "RWA aksiyalar ma'lumotini yuklashda xatolik." });
+  }
+});
+
+app.get("/api/rwa/check/:ticker", async (req, res) => {
+  const rawTicker = String(req.params.ticker || "").trim();
+  if (!isSafeSymbolInput(rawTicker)) {
+    res.status(400).json({ ok: false, error: "Noto'g'ri yoki ruxsat etilmagan aksiya belgisi." });
+    return;
+  }
+  try {
+    const analysis = await analyzeRwaStock(rawTicker);
+    const { chartPng, ...rest } = analysis;
+    const chartDataUrl = `data:image/png;base64,${chartPng.toString("base64")}`;
+    res.status(200).json({
+      ok: true,
+      result: {
+        ...rest,
+        chartDataUrl
+      }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Aksiya tahlilida xatolik.";
+    res.status(400).json({ ok: false, error: msg });
+  }
+});
+
+app.post("/api/rwa/toggle", (req, res) => {
+  const raw = req.body?.enabled;
+  const updated = typeof raw === "boolean" ? setRwaEnabled(raw) : toggleRwaEnabled();
+  res.status(200).json({
+    ok: true,
+    rwaEnabled: updated,
+    marketStatus: getUsStockMarketStatus()
+  });
+});
+
 // Non-reflecting 404 fallback + safe production error handler (must be last)
 app.use((_req, res) => {
   res.status(404).json({ error: "Manzil topilmadi (404)." });
@@ -492,8 +571,9 @@ app.use(safeErrorHandler);
 
 if (require.main === module) {
   const server = app.listen(env.PORT, () => {
-    console.log(`[CryptoQuant-Copilot] Stage 5.8 (Security Shield + Wall Street 4-Tab Pro) running on port ${env.PORT}`);
+    console.log(`[CryptoQuant-Copilot] Stage 7.0 (Stage 6.2 Crypto Core + Isolated RWA Stocks) running on port ${env.PORT}`);
     startScoutScheduler(60_000);
+    startRwaScheduler(300_000);
     startDailyReportScheduler();
     startTelegramBot();
   });
@@ -505,6 +585,7 @@ if (require.main === module) {
     console.log(`[CryptoQuant-Copilot] Received ${signal}, shutting down cleanly...`);
 
     stopScoutScheduler();
+    stopRwaScheduler();
     stopDailyReportScheduler();
 
     try {

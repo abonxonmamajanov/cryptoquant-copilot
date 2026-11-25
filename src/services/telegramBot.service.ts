@@ -39,6 +39,15 @@ import {
   get24hSignalReport
 } from "./signalTracker.service";
 import { pushActivityLog } from "./activityLog.service";
+import {
+  analyzeRwaStock,
+  getLatestRwaSnapshot,
+  getUsIndexBenchmark,
+  getUsStockMarketStatus,
+  isRwaEnabled,
+  setRwaEnabled
+} from "./rwaStocks.service";
+import { triggerRwaScanNow } from "./rwaScheduler.service";
 
 const BRAND_MOTTO = "Tez foyda emas — doimiy xotirjam, aniq savdo";
 
@@ -63,14 +72,15 @@ function buildMainMenu(): InlineKeyboard {
     .text("📂 Ochiq savdolarim", "menu_positions")
     .row()
     .text("🔍 Oxirgi Signallar", "menu_signals")
+    .text("📈 Aksiyalar (/stocks)", "menu_stocks")
+    .row()
     .text("⚖️ Yo'nalish (/direction)", "menu_direction")
-    .row()
     .text("🔀 Rejim (/mode)", "menu_mode")
+    .row()
     .text("📄 PDF Hisobot", "menu_pdf")
-    .row()
     .text("💎 Tariflar (Free/Pro/VIP)", "menu_plans")
-    .text("⚙️ Risk Profili", "menu_risk")
     .row()
+    .text("⚙️ Risk Profili", "menu_risk")
     .text("⚠️ Ogohlantirish", "menu_disclaimer");
 }
 
@@ -514,6 +524,170 @@ export function startTelegramBot(): void {
       await handleTokenCheck(ctx, arg);
     });
 
+    const handleRwaStockList = async (ctx: {
+      reply: (text: string, opts?: Record<string, unknown>) => Promise<unknown>;
+    }) => {
+      try {
+        let snap = getLatestRwaSnapshot();
+        if (!snap || snap.stocks.length === 0) {
+          snap = await triggerRwaScanNow();
+        }
+        const market = getUsStockMarketStatus();
+        const bm = snap?.benchmark ?? (await getUsIndexBenchmark());
+        const enabledText = isRwaEnabled() ? "✅ YOQILGAN (ON)" : "⏸️ O'CHIRILGAN (OFF)";
+
+        const lines = [
+          `🏛️ *AQSh TOKEN-AKSIYALARI (MEXC ONDO & xSTOCKS — RWA)*`,
+          `🕒 *AQSh Bozor:* ${market.sessionLabelUz}`,
+          `📊 *Wall Street 4H:* SPY *${bm.spyTrend4h}* | QQQ *${bm.qqqTrend4h}* → *${bm.usIndexRegime}*`,
+          `🔔 *RWA Avto-Signal:* ${enabledText}`,
+          ``
+        ];
+
+        const topStocks = (snap?.stocks ?? []).slice(0, 8);
+        if (topStocks.length === 0) {
+          lines.push("Hozircha faol token-aksiyalar yuklanmoqda. Birozdan so'ng qayta urinib ko'ring.");
+        } else {
+          lines.push(`*Top ${topStocks.length} faol MEXC Ondo / xStocks:*`);
+          for (const s of topStocks) {
+            const chgSign = s.priceChange24hPct >= 0 ? "+" : "";
+            const vIcon = s.verdict === "APPROVE" ? "✅" : "⚪";
+            const dIcon = s.direction === "SHORT" ? "🔴1x" : "🟢";
+            lines.push(
+              `${vIcon}${dIcon} *${s.canonicalTicker}* (\`${s.mexcSymbol}\`) — \`$${s.lastPrice}\` (${chgSign}${s.priceChange24hPct}%) | Spread: ${s.spreadPct}%`
+            );
+          }
+        }
+        lines.push(
+          ``,
+          `🔎 Batafsil 15M grafik + NASDAQ Peg: \`/stock NVDA\`, \`/stock AAPL\`, \`/stock TSLA\``,
+          `⚙️ Avto-signallarni boshqarish: \`/rwa on\` yoki \`/rwa off\``
+        );
+
+        const kb = new InlineKeyboard()
+          .text("📈 NVDA", "rwa_check:NVDA")
+          .text("📈 AAPL", "rwa_check:AAPL")
+          .text("📈 TSLA", "rwa_check:TSLA")
+          .row()
+          .text(
+            isRwaEnabled() ? "⏸️ RWA Avto: O'chirish" : "✅ RWA Avto: Yoqish",
+            isRwaEnabled() ? "rwa_toggle_off" : "rwa_toggle_on"
+          )
+          .row()
+          .webApp("🖥️ RWA Dashboard", getPublicAppUrl());
+
+        await ctx.reply(lines.join("\n"), { parse_mode: "Markdown", reply_markup: kb });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "RWA ro'yxatini yuklashda xatolik";
+        await ctx.reply(`❌ Token-aksiyalar yuklanmadi: ${msg}`);
+      }
+    };
+
+    const handleRwaStockCheck = async (
+      ctx: {
+        reply: (text: string, opts?: Record<string, unknown>) => Promise<unknown>;
+        replyWithPhoto: (photo: InputFile, opts?: Record<string, unknown>) => Promise<unknown>;
+      },
+      tickerRaw: string
+    ) => {
+      const clean = tickerRaw.trim().toUpperCase();
+      if (!clean) {
+        await ctx.reply("📈 Foydalanish: `/stock NVDA`, `/stock AAPL`, `/stock TSLA`", {
+          parse_mode: "Markdown"
+        });
+        return;
+      }
+      try {
+        await ctx.reply(`🏛️ *${clean}* token-aksiyasi (MEXC Ondo + Real NASDAQ Peg) tahlil qilinmoqda...`, {
+          parse_mode: "Markdown"
+        });
+        const analysis = await analyzeRwaStock(clean);
+        const kb = new InlineKeyboard()
+          .url("📈 TradingView (NASDAQ 15M)", analysis.tradingViewUrl)
+          .row()
+          .text("📋 Barcha Aksiyalar (/stocks)", "menu_stocks");
+
+        await ctx.replyWithPhoto(
+          new InputFile(analysis.chartPng, `${analysis.canonicalTicker}-rwa-15m.png`),
+          {
+            caption: analysis.caption,
+            parse_mode: "Markdown",
+            reply_markup: kb
+          }
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Aksiya tahlilida xatolik";
+        await ctx.reply(`❌ \`${clean}\` tekshiruvda xatolik: ${msg}`, { parse_mode: "Markdown" });
+      }
+    };
+
+    bot.command("stocks", async (ctx) => {
+      await handleRwaStockList(ctx);
+    });
+
+    bot.command("stock", async (ctx) => {
+      const arg = (ctx.match || "").trim();
+      await handleRwaStockCheck(ctx, arg);
+    });
+
+    bot.command("rwa", async (ctx) => {
+      const arg = (ctx.match || "").trim().toLowerCase();
+      if (arg === "on") {
+        setRwaEnabled(true);
+        await ctx.reply(
+          "✅ *RWA Token-Aksiyalar avto-signallari YOQILDI (ON).* (Faqat AQSh bozori ochiq soatlarida ishlaydi, kripto moduliga ta'sir qilmaydi.)",
+          { parse_mode: "Markdown", reply_markup: buildMainMenu() }
+        );
+        return;
+      }
+      if (arg === "off") {
+        setRwaEnabled(false);
+        await ctx.reply(
+          "⏸️ *RWA Token-Aksiyalar avto-signallari O'CHIRILDI (OFF).* Kripto signallari odatdagidek davom etadi.",
+          { parse_mode: "Markdown", reply_markup: buildMainMenu() }
+        );
+        return;
+      }
+      const status = isRwaEnabled() ? "✅ YOQILGAN (ON)" : "⏸️ O'CHIRILGAN (OFF)";
+      const market = getUsStockMarketStatus();
+      const kb = new InlineKeyboard()
+        .text("✅ Yoqish (/rwa on)", "rwa_toggle_on")
+        .text("⏸️ O'chirish (/rwa off)", "rwa_toggle_off");
+      await ctx.reply(
+        `🏛️ *RWA Avto-Signal Holati:* ${status}\n🕒 *AQSh Bozor:* ${market.sessionLabelUz}\n\nBoshqarish: \`/rwa on\` yoki \`/rwa off\``,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+    });
+
+    bot.callbackQuery("menu_stocks", async (ctx) => {
+      await ctx.answerCallbackQuery("Aksiyalar yuklanmoqda...");
+      await handleRwaStockList(ctx);
+    });
+
+    bot.callbackQuery(/^rwa_check:([A-Z0-9]{1,12})$/, async (ctx) => {
+      const ticker = ctx.match[1];
+      await ctx.answerCallbackQuery(`${ticker} tahlil qilinmoqda...`);
+      await handleRwaStockCheck(ctx, ticker);
+    });
+
+    bot.callbackQuery("rwa_toggle_on", async (ctx) => {
+      setRwaEnabled(true);
+      await ctx.answerCallbackQuery("RWA Yoqildi!");
+      await ctx.reply("✅ *RWA Token-Aksiyalar avto-signallari YOQILDI (ON).*", {
+        parse_mode: "Markdown",
+        reply_markup: buildMainMenu()
+      });
+    });
+
+    bot.callbackQuery("rwa_toggle_off", async (ctx) => {
+      setRwaEnabled(false);
+      await ctx.answerCallbackQuery("RWA O'chirildi!");
+      await ctx.reply("⏸️ *RWA Token-Aksiyalar avto-signallari O'CHIRILDI (OFF).*", {
+        parse_mode: "Markdown",
+        reply_markup: buildMainMenu()
+      });
+    });
+
     bot.command("stats", async (ctx) => {
       await ctx.reply(formatStatsText(), { parse_mode: "Markdown", reply_markup: buildMainMenu() });
     });
@@ -863,6 +1037,9 @@ export function startTelegramBot(): void {
       .setMyCommands([
         { command: "start", description: "Bosh menyu va Dashboard" },
         { command: "scan", description: "5-agent jonli skanerlash" },
+        { command: "stocks", description: "AQSh Token-Aksiyalar (MEXC Ondo/RWA)" },
+        { command: "stock", description: "Aksiya tahlili (/stock NVDA)" },
+        { command: "rwa", description: "RWA avto-signallarni yoqish/o'chirish" },
         { command: "direction", description: "Yo'nalish (LONG / SHORT 1x / Ikkalasi)" },
         { command: "mode", description: "Rejim tanlash (Hybrid/Intraday/Swing)" },
         { command: "positions", description: "Ochiq demo savdolarim" },
